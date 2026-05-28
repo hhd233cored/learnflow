@@ -44,8 +44,31 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://studyagent:studyagent@postgres:5432/studyagent}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MATERIAL_UPLOAD_DIR: ${MATERIAL_UPLOAD_DIR:-/app/storage/materials}
+      CHROMA_PERSIST_DIR: ${CHROMA_PERSIST_DIR:-/app/storage/chroma}
     ports:
       - "8000:8000"
+    volumes:
+      - backend-storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://studyagent:studyagent@postgres:5432/studyagent}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MATERIAL_UPLOAD_DIR: ${MATERIAL_UPLOAD_DIR:-/app/storage/materials}
+      CHROMA_PERSIST_DIR: ${CHROMA_PERSIST_DIR:-/app/storage/chroma}
+    volumes:
+      - backend-storage:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,4 +91,4 @@ volumes:
   postgres-data:
   redis-data:
   chroma-data:
-
+  backend-storage:

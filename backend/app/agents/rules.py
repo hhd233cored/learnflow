@@ -17,10 +17,10 @@ DEFAULT_OS_TOPICS = [
 
 
 def infer_day_count(goal: dict) -> int:
-    """Infer a realistic demo length from title or exam date.
+    """从标题或考试日期推断一个适合 Demo 的计划天数。
 
-    This keeps the first version practical: enough days to show a plan, but not
-    so many that the UI becomes noisy during a live demo.
+    这样可以让第一版足够实用：天数足够展示计划，但不会多到让现场演示
+    的界面过于拥挤。
     """
 
     title = goal.get("title", "")
@@ -38,6 +38,12 @@ def infer_day_count(goal: dict) -> int:
 
 
 def build_rule_based_plan(goal: dict) -> dict:
+    """在 LLM 不可用时生成确定性的学习计划。
+
+    这个兜底逻辑故意保持简单，但仍然符合产品形态：前期覆盖重点章节，
+    后期切换到综合练习和考前复盘。即使没有 API Key，也能保证 Demo 稳定。
+    """
+
     day_count = infer_day_count(goal)
     topics = goal.get("key_topics") or DEFAULT_OS_TOPICS
     topic_pool = [*topics, *DEFAULT_OS_TOPICS]
@@ -75,8 +81,15 @@ def build_rule_based_plan(goal: dict) -> dict:
 
 
 def build_rule_based_tasks(goal: dict, plan: dict) -> dict:
+    """为某一天计划生成确定性的每日任务。
+
+    任务组合模拟一个合理的学习 session：知识输入、专项练习、错题复盘、
+    主动回忆。每类任务的时长来自用户每日可用时间。
+    """
+
     daily_minutes = int(goal.get("daily_minutes", 120))
     topic = plan.get("topic", "今日主题")
+    reference_note = _reference_note(plan)
     knowledge_minutes = max(20, int(daily_minutes * 0.3))
     practice_minutes = max(25, int(daily_minutes * 0.38))
     review_minutes = max(15, int(daily_minutes * 0.18))
@@ -85,7 +98,7 @@ def build_rule_based_tasks(goal: dict, plan: dict) -> dict:
     tasks = [
         {
             "title": f"梳理「{topic}」核心概念",
-            "description": "阅读教材或课件，写下 3 个核心概念和 2 个易混点。",
+            "description": f"阅读教材或课件，写下 3 个核心概念和 2 个易混点。{reference_note}",
             "estimated_minutes": knowledge_minutes,
             "task_type": "knowledge",
         },
@@ -111,7 +124,26 @@ def build_rule_based_tasks(goal: dict, plan: dict) -> dict:
     return {"tasks": tasks}
 
 
+def _reference_note(plan: dict) -> str:
+    """当 Chroma 检索到课程资料时，生成一段简短的资料来源说明。"""
+
+    hits = plan.get("knowledge_context") or []
+    if not hits:
+        return ""
+    first = hits[0]
+    metadata = first.get("metadata") or {}
+    source = metadata.get("source") or metadata.get("filename")
+    if not source:
+        return ""
+    return f" 参考资料：{source}。"
+
+
 def calculate_completion_rate(tasks: list[dict]) -> float:
+    """根据任务状态计算加权完成率。
+
+    完成记 1.0，部分完成记 0.5，未完成或未开始记 0.0。
+    """
+
     if not tasks:
         return 0.0
     score = 0.0
@@ -124,6 +156,12 @@ def calculate_completion_rate(tasks: list[dict]) -> float:
 
 
 def extract_weak_points(tasks: list[dict], feedback: str) -> list[str]:
+    """从用户反馈和未完成任务中推断薄弱点。
+
+    这是一个轻量启发式规则，用来给 Review Agent 的兜底输出提供足够信号，
+    让后续计划调整能有依据。后续可以替换为分类器或更完整的学习画像模型。
+    """
+
     weak_points: list[str] = []
     feedback_lower = feedback.lower()
 
@@ -146,6 +184,8 @@ def extract_weak_points(tasks: list[dict], feedback: str) -> list[str]:
 
 
 def build_rule_based_review(plan: dict, tasks: list[dict], feedback: str) -> dict:
+    """在 LLM 不可用时生成确定性的每日复盘。"""
+
     completion_rate = calculate_completion_rate(tasks)
     weak_points = extract_weak_points(tasks, feedback)
     topic = plan.get("topic", "今日主题")
@@ -171,6 +211,8 @@ def build_rule_based_review(plan: dict, tasks: list[dict], feedback: str) -> dic
 def build_rule_based_adjustment(
     tomorrow_plan: dict, review: dict
 ) -> dict:
+    """根据复盘结果生成确定性的明日计划调整。"""
+
     weak_point = (review.get("weak_points") or ["今日薄弱点"])[0]
     original_topic = tomorrow_plan.get("topic", "明日计划")
     adjusted_topic = f"补强{weak_point} + {original_topic}"
@@ -187,4 +229,3 @@ def build_rule_based_adjustment(
         "adjusted_objective": adjusted_objective,
         "reason": reason,
     }
-

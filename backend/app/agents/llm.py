@@ -11,14 +11,64 @@ from app.services.cache import cache_key, get_json, set_json
 
 
 class DeepSeekClient:
-    """Small DeepSeek JSON client with deterministic fallback support.
+    """带确定性兜底能力的 DeepSeek JSON 客户端。
 
-    Agent nodes pass in a rule-based fallback. This makes the app runnable
-    during local demos even before the API key is configured.
+    Agent 节点会传入一个规则兜底结果。这样即使还没有配置 API Key，
+    应用也能在本地 Demo 中正常运行。
     """
 
     def __init__(self) -> None:
+        """为当前客户端实例加载一次 API 配置。"""
+
         self.settings = get_settings()
+
+    async def health_check(self) -> dict[str, Any]:
+        """直接探测 DeepSeek，不走缓存，也不走规则兜底。
+
+        普通 Agent 路径会在模型不可用时回退到本地规则，以保证 Demo 稳定；
+        这个方法更严格，用来确认外部 LLM API 是否真的接通。
+        """
+
+        configured = bool(self.settings.deepseek_api_key)
+        result: dict[str, Any] = {
+            "configured": configured,
+            "provider": "deepseek",
+            "model": self.settings.deepseek_model,
+            "ok": False,
+            "reply": None,
+            "error": None,
+        }
+
+        if not configured:
+            result["error"] = "DEEPSEEK_API_KEY is not configured"
+            return result
+
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    f"{self.settings.deepseek_base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.deepseek_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.settings.deepseek_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "请只回复：DeepSeek API 测试成功",
+                            }
+                        ],
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+                result["ok"] = True
+                result["reply"] = payload["choices"][0]["message"]["content"]
+                return result
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
 
     async def complete_json(
         self,
@@ -26,6 +76,13 @@ class DeepSeekClient:
         user_payload: dict[str, Any],
         fallback: dict[str, Any],
     ) -> dict[str, Any]:
+        """请求 DeepSeek 返回 JSON，并产出安全的字典结果。
+
+        所有 Agent 节点都会调用这个方法。它有三层稳定性保护：
+        未配置 Key 时直接兜底、重复 prompt 走 Redis 缓存、模型 JSON 异常
+        或网络失败时回退到规则结果。
+        """
+
         if not self.settings.deepseek_api_key:
             return fallback
 
@@ -69,12 +126,18 @@ class DeepSeekClient:
                 set_json(key, parsed)
                 return parsed
         except Exception:
-            # First version favors a stable product demo over surfacing model
-            # transport errors to the UI. Logs/observability can be added later.
+            # 第一版优先保证产品 Demo 稳定，而不是把模型传输错误直接暴露给 UI。
+            # 后续可以接入日志和可观测性系统。
             return fallback
 
 
 def _parse_json_object(content: str, fallback: dict[str, Any]) -> dict[str, Any]:
+    """从模型输出中解析 JSON 对象。
+
+    虽然我们要求 DeepSeek 返回 JSON，但模型有时会在 JSON 外包裹解释文字。
+    这个函数会尝试从文本中截取 JSON；如果仍然失败，就返回确定性兜底结果。
+    """
+
     try:
         return json.loads(content)
     except json.JSONDecodeError:

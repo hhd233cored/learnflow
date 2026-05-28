@@ -44,6 +44,23 @@ export type Adjustment = {
   reason: string;
 };
 
+export type CourseMaterial = {
+  id: number;
+  goal_id: number;
+  filename: string;
+  file_type: string;
+  parse_status: string;
+  error_message?: string | null;
+  chunk_count: number;
+  chroma_collection: string;
+};
+
+export type KnowledgeSearchHit = {
+  content: string;
+  metadata: Record<string, unknown>;
+  distance?: number | null;
+};
+
 export type GoalDetail = {
   id: number;
   title: string;
@@ -111,6 +128,33 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from_day: fromDay })
     });
+  },
+
+  uploadMaterial(goalId: number, file: File) {
+    const body = new FormData();
+    body.append("file", file);
+    return fetch(`${API_BASE_URL}/goals/${goalId}/materials/upload`, {
+      method: "POST",
+      body
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Upload failed");
+      }
+      return response.json() as Promise<CourseMaterial>;
+    });
+  },
+
+  listMaterials(goalId: number) {
+    return request<CourseMaterial[]>(`/goals/${goalId}/materials`);
+  },
+
+  searchKnowledge(goalId: number, query: string, topK = 5) {
+    return request<{ hits: KnowledgeSearchHit[] }>(
+      `/goals/${goalId}/knowledge/search`,
+      {
+        method: "POST",
+        body: JSON.stringify({ query, top_k: topK })
+      }
+    );
   }
 };
-

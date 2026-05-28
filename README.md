@@ -44,7 +44,10 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+
+cd C:\Users\33612\Documents\GitHub\StudyAgent\backend
+.\.venv\Scripts\activate
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 前端：
@@ -52,7 +55,9 @@ uvicorn app.main:app --reload
 ```bash
 cd frontend
 npm install
-npm run dev
+
+cd C:\Users\33612\Documents\GitHub\StudyAgent\frontend
+npm.cmd run dev
 ```
 
 ## 第一版功能
@@ -64,10 +69,93 @@ npm run dev
 - AI 复盘总结
 - 根据完成率和薄弱点调整明日计划
 
+## v0.2 课程知识库
+
+当前已接入 Chroma 本地持久化知识库，支持上传课程资料并建库：
+
+- 支持格式：PDF、DOCX、PPTX、TXT、MD
+- 解析工具：PyMuPDF、python-docx、python-pptx
+- 切分策略：段落优先，长段落按窗口切分
+- 向量库：Chroma `PersistentClient`
+- Embedding：本地哈希 embedding，离线可运行，后续可替换为真实 embedding 模型
+
+接口：
+
+```text
+POST /api/v1/goals/{goal_id}/materials/upload
+GET  /api/v1/goals/{goal_id}/materials
+GET  /api/v1/materials/{material_id}
+POST /api/v1/goals/{goal_id}/knowledge/search
+```
+
+上传示例：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v1/goals/1/materials/upload" `
+  -Method Post `
+  -Form @{ file = Get-Item "C:\path\to\course.pdf" }
+```
+
+检索示例：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v1/goals/1/knowledge/search" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"query":"进程同步 PV 操作","top_k":5}'
+```
+
+本地运行时会把上传文件和 Chroma 数据保存到：
+
+```text
+backend/storage/
+```
+
+## v0.2 异步任务队列
+
+当前已接入 Celery + Redis，用于处理耗时任务：
+
+- 课程资料异步解析与 Chroma 建库
+- 学习目标异步长计划生成
+- jobs 表记录任务状态，前端或接口文档可轮询查询进度
+
+新增接口：
+
+```text
+POST /api/v1/goals/async
+POST /api/v1/goals/{goal_id}/materials/upload/async
+GET  /api/v1/jobs/{job_id}
+```
+
+任务状态：
+
+```text
+pending   等待 worker 处理
+running   正在执行
+success   执行成功
+failed    执行失败
+```
+
+Docker Compose 会同时启动 `backend` 和 `worker`：
+
+```bash
+docker compose up --build
+```
+
+Windows 本地开发时，需要先启动 Redis，然后另开一个 PowerShell 启动 worker：
+
+```powershell
+cd C:\Users\33612\Documents\GitHub\StudyAgent\backend
+.\.venv\Scripts\activate
+celery -A app.tasks.celery_app.celery_app worker --loglevel=info --pool=solo
+```
+
+`--pool=solo` 是 Windows 本地运行 Celery worker 时更稳的方式。
+
 ## 第二阶段建议
 
-- 接入 Chroma，支持课程 PDF / PPT / Word 建库
+- 替换为真实语义 embedding 模型，提升中文课程资料检索质量
 - 加入用户登录与长期学习画像
-- 加入异步任务队列，处理文档解析和长计划生成
 - 加入测试集，评估计划生成质量和格式稳定性
-

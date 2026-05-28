@@ -13,6 +13,7 @@ import {
   TimerReset
 } from "lucide-react";
 import { api, Adjustment, GoalDetail, Review, StudyTask } from "@/lib/api";
+import type { CourseMaterial, KnowledgeSearchHit } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +55,9 @@ export default function Home() {
   const [tasks, setTasks] = useState<StudyTask[]>([]);
   const [review, setReview] = useState<Review | null>(null);
   const [adjustment, setAdjustment] = useState<Adjustment | null>(null);
+  const [materials, setMaterials] = useState<CourseMaterial[]>([]);
+  const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
+  const [knowledgeQuery, setKnowledgeQuery] = useState("PV 操作 信号量");
   const [feedback, setFeedback] = useState("PV 操作题错得比较多，信号量含义有点混。");
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +121,33 @@ export default function Home() {
       setTasks([]);
       setReview(null);
       setAdjustment(null);
+      setMaterials([]);
+      setKnowledgeHits([]);
+    }
+  }
+
+  async function handleUploadMaterial(event: React.ChangeEvent<HTMLInputElement>) {
+    if (!goal || !event.target.files?.[0]) {
+      return;
+    }
+    const file = event.target.files[0];
+    const uploaded = await run("material", () => api.uploadMaterial(goal.id, file));
+    event.target.value = "";
+    if (uploaded) {
+      const nextMaterials = await api.listMaterials(goal.id);
+      setMaterials(nextMaterials);
+    }
+  }
+
+  async function handleSearchKnowledge() {
+    if (!goal || !knowledgeQuery.trim()) {
+      return;
+    }
+    const result = await run("knowledge", () =>
+      api.searchKnowledge(goal.id, knowledgeQuery.trim(), 5)
+    );
+    if (result) {
+      setKnowledgeHits(result.hits);
     }
   }
 
@@ -512,9 +543,91 @@ export default function Home() {
                     </p>
                   </div>
                 ) : null}
-              </CardContent>
-            </Card>
-          </section>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>课程知识库</CardTitle>
+            <CardDescription>
+              上传 PDF、DOCX、PPTX、TXT 或 MD，后端会解析并写入 Chroma。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="material">课程资料</Label>
+              <Input
+                id="material"
+                type="file"
+                accept=".pdf,.docx,.pptx,.txt,.md"
+                disabled={!goal || isBusy}
+                onChange={handleUploadMaterial}
+              />
+            </div>
+            {materials.length > 0 ? (
+              <div className="space-y-2">
+                {materials.map((material) => (
+                  <div
+                    className="rounded-md border bg-background p-3 text-sm"
+                    key={material.id}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{material.filename}</span>
+                      <Badge
+                        tone={
+                          material.parse_status === "ready"
+                            ? "teal"
+                            : material.parse_status === "failed"
+                              ? "rose"
+                              : "amber"
+                        }
+                      >
+                        {material.parse_status}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">
+                      {material.chunk_count} chunks · {material.chroma_collection}
+                    </p>
+                    {material.error_message ? (
+                      <p className="mt-2 text-rose-700">{material.error_message}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState text="创建目标后，可以上传课程资料建立专属知识库。" />
+            )}
+            <div className="flex gap-2">
+              <Input
+                value={knowledgeQuery}
+                onChange={(event) => setKnowledgeQuery(event.target.value)}
+                disabled={!goal || isBusy}
+              />
+              <Button
+                variant="outline"
+                onClick={handleSearchKnowledge}
+                disabled={!goal || isBusy}
+              >
+                检索
+              </Button>
+            </div>
+            {knowledgeHits.length > 0 ? (
+              <div className="space-y-2">
+                {knowledgeHits.map((hit, index) => (
+                  <div className="rounded-md border bg-background p-3" key={index}>
+                    <p className="line-clamp-4 text-sm leading-6 text-muted-foreground">
+                      {hit.content}
+                    </p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {String(hit.metadata.source ?? hit.metadata.filename ?? "material")}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      </section>
         </div>
       </section>
     </main>
@@ -528,4 +641,3 @@ function EmptyState({ text }: { text: string }) {
     </div>
   );
 }
-

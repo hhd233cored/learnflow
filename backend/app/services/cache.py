@@ -12,6 +12,12 @@ _client: Redis | None = None
 
 
 def _redis() -> Redis:
+    """创建或复用 Redis 客户端。
+
+    设置较短的 socket timeout，可以避免本地开发时 Redis 没启动导致用户请求
+    被长时间阻塞。
+    """
+
     global _client
     if _client is None:
         settings = get_settings()
@@ -25,12 +31,16 @@ def _redis() -> Redis:
 
 
 def cache_key(prefix: str, payload: dict[str, Any]) -> str:
+    """根据结构化 payload 生成稳定的缓存 key。"""
+
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"studyagent:{prefix}:{digest}"
 
 
 def get_json(key: str) -> dict[str, Any] | None:
+    """从 Redis 读取 JSON 对象；缓存未命中或失败时返回 None。"""
+
     try:
         value = _redis().get(key)
         if not value:
@@ -43,6 +53,11 @@ def get_json(key: str) -> dict[str, Any] | None:
 
 
 def set_json(key: str, value: dict[str, Any], ttl_seconds: int = 1800) -> None:
+    """把 JSON 对象写入 Redis，并设置过期时间。
+
+    缓存只是优化，不是 Agent 输出正确性的前提；因此缓存失败时直接忽略。
+    """
+
     try:
         _redis().setex(
             key,
@@ -51,4 +66,3 @@ def set_json(key: str, value: dict[str, Any], ttl_seconds: int = 1800) -> None:
         )
     except Exception:
         return
-

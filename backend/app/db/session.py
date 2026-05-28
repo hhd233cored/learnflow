@@ -18,9 +18,10 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 def get_db() -> Generator[Session, None, None]:
+    """FastAPI 依赖：为每个请求提供一个数据库 session。"""
+
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-

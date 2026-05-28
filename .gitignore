@@ -17,3 +17,4 @@ coverage/
 postgres-data/
 redis-data/
 chroma-data/
+storage/

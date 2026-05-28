@@ -20,6 +20,12 @@ from app.schemas import GoalCreate
 
 
 class AgentState(TypedDict, total=False):
+    """LangGraph 节点之间传递的共享状态对象。
+
+    LangGraph 节点接收和返回的都是字典。使用 TypedDict 可以让 review 的人
+    直观看到 Planner、Task、Review、Adjust 这些节点之间可能流转哪些字段。
+    """
+
     goal: dict[str, Any]
     plan: dict[str, Any]
     daily_plan: dict[str, Any]
@@ -38,10 +44,10 @@ async def _run_single_node(
     node: Callable[[AgentState], Awaitable[AgentState]],
     state: AgentState,
 ) -> AgentState:
-    """Run a node through LangGraph while keeping a direct fallback path.
+    """通过 LangGraph 执行单个节点，同时保留直接调用兜底路径。
 
-    The first product version uses one node per API action. Keeping LangGraph in
-    the execution path now makes it easy to expand into a multi-step graph later.
+    第一版每个 API 动作只跑一个节点，但现在就把 LangGraph 放进执行路径，
+    后续扩展成多节点工作流会更自然。
     """
 
     if StateGraph is None:
@@ -56,9 +62,17 @@ async def _run_single_node(
 
 
 async def generate_plan(goal: GoalCreate) -> list[dict[str, Any]]:
+    """为学习目标生成完整每日计划，并做格式归一化。
+
+    Planner Agent 可能会调用 DeepSeek，但每次运行都有确定性的本地规则兜底。
+    返回值始终是可以直接写入 `study_plans` 的规范化计划字典列表。
+    """
+
     goal_payload = goal.model_dump()
 
     async def planner_node(state: AgentState) -> AgentState:
+        """向 Planner Agent 请求 `daily_plans` JSON 的 LangGraph 节点。"""
+
         fallback = build_rule_based_plan(state["goal"])
         result = await llm.complete_json(
             system_prompt=(
@@ -76,7 +90,16 @@ async def generate_plan(goal: GoalCreate) -> list[dict[str, Any]]:
 
 
 async def generate_tasks(goal: dict, daily_plan: dict) -> list[dict[str, Any]]:
+    """为某一天计划生成可执行任务卡片。
+
+    `daily_plan` 可能包含从 Chroma 检索到的 `knowledge_context`。
+    Task Agent 可以利用这些上下文引用课程资料；如果没有检索数据，
+    本地规则兜底仍然可以正常工作。
+    """
+
     async def task_node(state: AgentState) -> AgentState:
+        """把每日主题转换成任务 JSON 的 LangGraph 节点。"""
+
         fallback = build_rule_based_tasks(state["goal"], state["daily_plan"])
         result = await llm.complete_json(
             system_prompt=(
@@ -86,6 +109,7 @@ async def generate_tasks(goal: dict, daily_plan: dict) -> list[dict[str, Any]]:
             user_payload={
                 "goal": state["goal"],
                 "daily_plan": state["daily_plan"],
+                "knowledge_context": state["daily_plan"].get("knowledge_context", []),
                 "schema": _task_schema_hint(),
             },
             fallback=fallback,
@@ -102,7 +126,11 @@ async def generate_tasks(goal: dict, daily_plan: dict) -> list[dict[str, Any]]:
 async def generate_review(
     goal: dict, daily_plan: dict, tasks: list[dict], feedback: str
 ) -> dict[str, Any]:
+    """根据任务状态和用户反馈生成当天复盘。"""
+
     async def review_node(state: AgentState) -> AgentState:
+        """向 Review Agent 请求总结和薄弱点的 LangGraph 节点。"""
+
         fallback = build_rule_based_review(
             state["daily_plan"], state["tasks"], state["feedback"]
         )
@@ -136,7 +164,11 @@ async def generate_review(
 async def adjust_tomorrow_plan(
     goal: dict, tomorrow_plan: dict, review: dict
 ) -> dict[str, Any]:
+    """根据最新复盘结果生成明日调整计划。"""
+
     async def adjust_node(state: AgentState) -> AgentState:
+        """向 Adjust Agent 请求调整前后内容的 LangGraph 节点。"""
+
         fallback = build_rule_based_adjustment(state["tomorrow_plan"], state["review"])
         result = await llm.complete_json(
             system_prompt=(
@@ -165,6 +197,12 @@ async def adjust_tomorrow_plan(
 
 
 def _normalize_daily_plans(raw: dict[str, Any], fallback: list[dict]) -> list[dict]:
+    """校验并修复 Planner Agent 的输出。
+
+    LLM 输出一律按不可信输入处理。这里会校验列表结构、最大长度、日期格式
+    和必需字段。如果发现不安全或格式异常，就返回确定性的规则兜底计划。
+    """
+
     items = raw.get("daily_plans")
     if not isinstance(items, list) or not items:
         return fallback
@@ -193,6 +231,12 @@ def _normalize_daily_plans(raw: dict[str, Any], fallback: list[dict]) -> list[di
 
 
 def _normalize_tasks(raw: list[dict], fallback: list[dict], goal: dict) -> list[dict]:
+    """校验并修复 Task Agent 的输出。
+
+    保证任务包含必需字段，限制任务数量，并确保总预计时长不会超过用户每日
+    可用时间。
+    """
+
     if not isinstance(raw, list) or not raw:
         return fallback
 
@@ -224,6 +268,8 @@ def _normalize_tasks(raw: list[dict], fallback: list[dict], goal: dict) -> list[
 
 
 def _normalize_review(raw: dict[str, Any], fallback: dict) -> dict:
+    """校验并修复 Review Agent 的输出。"""
+
     try:
         completion_rate = float(raw.get("completion_rate", fallback["completion_rate"]))
         return {
@@ -237,6 +283,8 @@ def _normalize_review(raw: dict[str, Any], fallback: dict) -> dict:
 
 
 def _normalize_adjustment(raw: dict[str, Any], fallback: dict) -> dict:
+    """校验并修复 Adjust Agent 的输出。"""
+
     return {
         "adjusted_topic": str(raw.get("adjusted_topic") or fallback["adjusted_topic"])[:200],
         "adjusted_objective": str(
@@ -247,6 +295,8 @@ def _normalize_adjustment(raw: dict[str, Any], fallback: dict) -> dict:
 
 
 def _string_list(value: Any, fallback: list[str]) -> list[str]:
+    """返回一个短的非空字符串列表；格式不对时使用兜底列表。"""
+
     if not isinstance(value, list):
         return fallback
     cleaned = [str(item) for item in value if str(item).strip()]
@@ -254,6 +304,8 @@ def _string_list(value: Any, fallback: list[str]) -> list[str]:
 
 
 def _plan_schema_hint() -> dict:
+    """发送给 Planner Agent 的 schema 示例，用于约束结构化 JSON 输出。"""
+
     return {
         "daily_plans": [
             {
@@ -267,6 +319,8 @@ def _plan_schema_hint() -> dict:
 
 
 def _task_schema_hint() -> dict:
+    """发送给 Task Agent 的 schema 示例，用于约束结构化 JSON 输出。"""
+
     return {
         "tasks": [
             {
@@ -280,6 +334,8 @@ def _task_schema_hint() -> dict:
 
 
 def _review_schema_hint() -> dict:
+    """发送给 Review Agent 的 schema 示例，用于约束结构化 JSON 输出。"""
+
     return {
         "completion_rate": 0.75,
         "summary": "今日复盘总结",
@@ -289,6 +345,8 @@ def _review_schema_hint() -> dict:
 
 
 def _adjust_schema_hint() -> dict:
+    """发送给 Adjust Agent 的 schema 示例，用于约束结构化 JSON 输出。"""
+
     return {
         "adjusted_topic": "补强 PV 操作 + 内存管理",
         "adjusted_objective": "调整后的明日目标",
