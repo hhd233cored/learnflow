@@ -1,0 +1,2 @@
+"""StudyAgent backend package."""
+
