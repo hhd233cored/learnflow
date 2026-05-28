@@ -6,6 +6,17 @@ export type GoalPayload = {
   key_topics: string[];
 };
 
+export type Job = {
+  id: number;
+  goal_id?: number | null;
+  job_type: string;
+  status: "pending" | "running" | "success" | "failed";
+  progress: number;
+  result_json?: Record<string, unknown> | null;
+  error_message?: string | null;
+  finished_at?: string | null;
+};
+
 export type StudyPlan = {
   id: number;
   day_index: number;
@@ -99,8 +110,23 @@ export const api = {
     });
   },
 
+  createGoalAsync(payload: GoalPayload) {
+    return request<Job>("/goals/async", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  getJob(jobId: number) {
+    return request<Job>(`/jobs/${jobId}`);
+  },
+
   getGoal(goalId: number) {
     return request<GoalDetail>(`/goals/${goalId}`);
+  },
+
+  getTasks(planId: number) {
+    return request<StudyTask[]>(`/plans/${planId}/tasks`);
   },
 
   generateTasks(planId: number) {

@@ -248,6 +248,18 @@ async def generate_daily_tasks(plan_id: int, db: Session = Depends(get_db)):
     return crud.replace_tasks(db, plan.id, tasks)
 
 
+@router.get("/plans/{plan_id}/tasks", response_model=list[StudyTaskRead])
+def list_daily_tasks(plan_id: int, db: Session = Depends(get_db)):
+    """读取某一天已经生成过的任务卡片。
+
+    前端切换到任意 Day 时会先调用这个接口。如果返回空列表，
+    再按需调用生成接口，避免用户只是查看计划时重复覆盖已有任务。
+    """
+
+    _get_plan_or_404(db, plan_id)
+    return crud.list_tasks(db, plan_id)
+
+
 @router.patch("/tasks/{task_id}/status", response_model=StudyTaskRead)
 def update_task_status(
     task_id: int, payload: TaskStatusUpdate, db: Session = Depends(get_db)

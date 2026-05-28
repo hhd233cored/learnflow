@@ -60,6 +60,15 @@ cd C:\Users\33612\Documents\GitHub\StudyAgent\frontend
 npm.cmd run dev
 ```
 
+本地开发默认可以不启动 Redis/Celery。保持 `.env` 中：
+
+```env
+NEXT_PUBLIC_USE_ASYNC_JOBS=false
+```
+
+此时前端会显示模拟进度条，但计划生成仍走同步接口 `POST /api/v1/goals`。
+如果要测试真实异步队列，再改为 `true`，并启动 Redis 和 Celery worker。
+
 ## 第一版功能
 
 - 创建学习目标
