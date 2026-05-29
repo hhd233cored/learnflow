@@ -25,7 +25,9 @@ async def generate_quiz_for_task(task: models.StudyTask) -> dict[str, Any]:
         system_prompt=(
             "你是 Quiz Agent。请为大学生每日学习任务生成 3 道中文小测题。"
             "优先结合提供的课程资料；如果资料不足，请基于任务主题和通用课程知识出题，"
-            "但不要假装引用资料。必须返回 JSON。"
+            "但不要假装引用资料。题干、选项、参考答案和解析都可以使用 Markdown。"
+            "所有数学公式必须使用 LaTeX 分隔符：行内公式用 \\(...\\)，独立公式用 \\[...\\]；"
+            "矩阵请使用 \\begin{pmatrix}...\\end{pmatrix}。必须返回 JSON。"
         ),
         user_payload={
             "task": _task_payload(task),
@@ -468,17 +470,17 @@ def _quiz_schema_hint() -> dict[str, Any]:
             {
                 "id": "q1",
                 "type": "single_choice",
-                "question": "题干",
-                "options": ["A. 选项", "B. 选项", "C. 选项", "D. 选项"],
-                "correct_answer": "A. 选项",
-                "explanation": "解析",
+                "question": "对于矩阵 \\(A\\)，其 \\(\\|A\\|_1\\) 等于多少？",
+                "options": ["A. \\(5\\)", "B. \\(6\\)", "C. \\(4\\)", "D. \\(7\\)"],
+                "correct_answer": "B. \\(6\\)",
+                "explanation": "解析中也使用 Markdown 和 LaTeX。",
             },
             {
                 "id": "q3",
                 "type": "short_answer",
-                "question": "简答题题干",
-                "reference_answer": "参考答案",
-                "explanation": "解析",
+                "question": "请说明 \\(\\|A\\|_2 = \\sqrt{\\lambda_{\\max}(A^T A)}\\) 的含义。",
+                "reference_answer": "参考答案可以包含公式，如 \\(A^T A\\)。",
+                "explanation": "解析可以包含列表、代码或公式。",
             },
         ]
     }

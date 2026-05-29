@@ -68,3 +68,16 @@ select {
   border: 1px solid hsl(var(--border));
   padding: 0.35rem 0.5rem;
 }
+
+.quiz-markdown {
+  max-width: 100%;
+}
+
+.quiz-markdown.inline-markdown,
+.quiz-markdown.inline-markdown > p {
+  display: inline;
+}
+
+.quiz-markdown.inline-markdown > * + * {
+  margin-top: 0;
+}

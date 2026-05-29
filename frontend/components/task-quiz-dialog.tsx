@@ -10,6 +10,9 @@ import {
   X,
   XCircle
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkMath from "remark-math";
 import { api } from "@/lib/api";
 import type {
   QuizAnswerItem,
@@ -167,9 +170,9 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
                       约 {quiz.result.score} 分
                     </Badge>
                   </div>
-                  <p className="mt-2 text-sm leading-6 text-teal-900">
-                    {quiz.result.summary}
-                  </p>
+                  <div className="mt-2 text-sm leading-6 text-teal-900">
+                    <MarkdownContent content={quiz.result.summary} />
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -240,7 +243,9 @@ function QuestionBlock({
               {question.type === "single_choice" ? "单选" : "简答"}
             </Badge>
           </div>
-          <p className="mt-3 text-sm font-medium leading-6">{question.question}</p>
+          <div className="mt-3 text-sm font-medium leading-6">
+            <MarkdownContent content={question.question} />
+          </div>
         </div>
         {result ? (
           <Badge tone={result.is_correct ? "teal" : "rose"}>
@@ -268,7 +273,11 @@ function QuestionBlock({
                 onChange={() => onAnswer(option)}
                 type="radio"
               />
-              <span>{option}</span>
+              <MarkdownContent
+                className="min-w-0 flex-1"
+                content={option}
+                inline
+              />
             </label>
           ))}
         </div>
@@ -289,20 +298,122 @@ function QuestionBlock({
             ) : (
               <XCircle className="h-4 w-4 text-rose-700" aria-hidden="true" />
             )}
-            <span className="font-medium">{result.feedback}</span>
+            <div className="min-w-0 flex-1 font-medium">
+              <MarkdownContent content={result.feedback} />
+            </div>
           </div>
           {result.correct_answer ? (
-            <p className="leading-6 text-muted-foreground">
-              参考答案：{result.correct_answer}
-            </p>
+            <div className="leading-6 text-muted-foreground">
+              <span className="font-medium text-foreground">参考答案：</span>
+              <MarkdownContent content={result.correct_answer} />
+            </div>
           ) : null}
           {question.explanation ? (
-            <p className="leading-6 text-muted-foreground">
-              解析：{question.explanation}
-            </p>
+            <div className="leading-6 text-muted-foreground">
+              <span className="font-medium text-foreground">解析：</span>
+              <MarkdownContent content={question.explanation} />
+            </div>
           ) : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+function MarkdownContent({
+  className,
+  content,
+  inline = false
+}: {
+  className?: string;
+  content: string;
+  inline?: boolean;
+}) {
+  const Wrapper = inline ? "span" : "div";
+
+  return (
+    <Wrapper
+      className={cn("chat-markdown quiz-markdown", inline && "inline-markdown", className)}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={{
+          p: ({ children }) => (inline ? <span>{children}</span> : <p>{children}</p>),
+          code: ({ className, children, ...props }) => {
+            const isBlock = /language-/.test(className ?? "");
+            if (!isBlock) {
+              return (
+                <code
+                  className="rounded bg-muted px-1 py-0.5 font-mono text-[0.92em]"
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <code className={cn("block font-mono text-xs", className)} {...props}>
+                {children}
+              </code>
+            );
+          },
+          pre: ({ children }) => (
+            <pre className="overflow-x-auto rounded-md border bg-slate-950 p-3 text-slate-50">
+              {children}
+            </pre>
+          ),
+          ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
+          blockquote: ({ children }) => (
+            <blockquote className="border-l-2 border-primary/50 pl-3 text-muted-foreground">
+              {children}
+            </blockquote>
+          )
+        }}
+      >
+        {normalizeQuizMarkdown(content)}
+      </ReactMarkdown>
+    </Wrapper>
+  );
+}
+
+function normalizeQuizMarkdown(content: string) {
+  const mathNormalized = content
+    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
+    .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
+
+  // 已经含有标准 LaTeX 分隔符时，避免再做启发式替换造成嵌套。
+  if (mathNormalized.includes("$")) {
+    return mathNormalized;
+  }
+
+  return mathNormalized
+    .replace(
+      /\b([A-Za-z])\s*=\s*\[\[\s*([^,\]\[]+)\s*,\s*([^\]\[]+?)\s*\]\s*,\s*\[\s*([^,\]\[]+)\s*,\s*([^\]\[]+?)\s*\]\]/g,
+      (
+        _,
+        name: string,
+        a11: string,
+        a12: string,
+        a21: string,
+        a22: string
+      ) => {
+        return `$${name} = \\begin{pmatrix} ${a11.trim()} & ${a12.trim()} \\\\ ${a21.trim()} & ${a22.trim()} \\end{pmatrix}$`;
+      }
+    )
+    .replace(/\|\|([^|\n]{1,60})\|\|_([0-9A-Za-z∞]+)/g, (_, body: string, norm: string) => {
+      return `$\\|${body.trim()}\\|_${norm}$`;
+    })
+    .replace(
+      /(^|[^\\|])\|([^|\n]{1,60})\|_([0-9A-Za-z∞]+)/g,
+      (_, prefix: string, body: string, norm: string) => {
+        return `${prefix}$\\|${body.trim()}\\|_${norm}$`;
+      }
+    )
+    .replace(/\b([A-Za-z])\^T\s*([A-Za-z])\b/g, (_, left: string, right: string) => {
+      return `$${left}^T ${right}$`;
+    })
+    .replace(/sqrt\(lambda_max\)/gi, "$\\sqrt{\\lambda_{\\max}}$")
+    .replace(/lambda_max/gi, "$\\lambda_{\\max}$");
 }
