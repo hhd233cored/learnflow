@@ -82,6 +82,25 @@ export type GoalDetail = {
   plans: StudyPlan[];
 };
 
+export type GoalSummary = {
+  id: number;
+  title: string;
+  exam_date: string;
+  daily_minutes: number;
+  current_level: string;
+  key_topics: string[];
+  status: string;
+  plan_count: number;
+  material_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
 
@@ -110,6 +129,26 @@ export const api = {
     });
   },
 
+  createGoalWithMaterials(payload: GoalPayload, files: File[]) {
+    const body = new FormData();
+    body.append("title", payload.title);
+    body.append("exam_date", payload.exam_date);
+    body.append("daily_minutes", String(payload.daily_minutes));
+    body.append("current_level", payload.current_level);
+    body.append("key_topics", payload.key_topics.join(","));
+    files.forEach((file) => body.append("files", file));
+
+    return fetch(`${API_BASE_URL}/goals/with-materials`, {
+      method: "POST",
+      body
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Create goal failed");
+      }
+      return response.json() as Promise<GoalDetail>;
+    });
+  },
+
   createGoalAsync(payload: GoalPayload) {
     return request<Job>("/goals/async", {
       method: "POST",
@@ -123,6 +162,20 @@ export const api = {
 
   getGoal(goalId: number) {
     return request<GoalDetail>(`/goals/${goalId}`);
+  },
+
+  listGoals() {
+    return request<GoalSummary[]>("/goals");
+  },
+
+  deleteGoal(goalId: number) {
+    return fetch(`${API_BASE_URL}/goals/${goalId}`, {
+      method: "DELETE"
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Delete goal failed");
+      }
+    });
   },
 
   getTasks(planId: number) {
@@ -182,5 +235,22 @@ export const api = {
         body: JSON.stringify({ query, top_k: topK })
       }
     );
+  },
+
+  async streamChat(payload: {
+    messages: ChatMessage[];
+    goal_id?: number;
+    plan_id?: number;
+  }) {
+    const response = await fetch(`${API_BASE_URL}/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error((await response.text()) || "Chat request failed");
+    }
+    return response.body.getReader();
   }
 };

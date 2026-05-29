@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./storage/chroma"
     chunk_size: int = 800
     chunk_overlap: int = 120
+    rag_enrich_max_chunks: int = 12
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

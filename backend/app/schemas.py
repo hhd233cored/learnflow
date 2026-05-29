@@ -58,6 +58,22 @@ class GoalRead(BaseModel):
     plans: list[StudyPlanRead] = []
 
 
+class GoalSummaryRead(BaseModel):
+    """学习目标列表页使用的轻量摘要。"""
+
+    id: int
+    title: str
+    exam_date: date
+    daily_minutes: int
+    current_level: str
+    key_topics: list[str]
+    status: str
+    plan_count: int
+    material_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class StudyTaskRead(BaseModel):
     """单个任务卡片的响应结构。"""
 
@@ -124,6 +140,21 @@ class LLMHealthRead(BaseModel):
     ok: bool
     reply: str | None = None
     error: str | None = None
+
+
+class ChatMessage(BaseModel):
+    """聊天抽屉中的单条消息。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=6000)
+
+
+class ChatStreamRequest(BaseModel):
+    """流式聊天接口的请求体。"""
+
+    messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+    goal_id: int | None = None
+    plan_id: int | None = None
 
 
 class CourseMaterialRead(BaseModel):

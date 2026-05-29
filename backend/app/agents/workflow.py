@@ -61,14 +61,20 @@ async def _run_single_node(
     return await compiled.ainvoke(state)
 
 
-async def generate_plan(goal: GoalCreate) -> list[dict[str, Any]]:
+async def generate_plan(
+    goal: GoalCreate, knowledge_context: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
     """为学习目标生成完整每日计划，并做格式归一化。
 
     Planner Agent 可能会调用 DeepSeek，但每次运行都有确定性的本地规则兜底。
     返回值始终是可以直接写入 `study_plans` 的规范化计划字典列表。
+    `knowledge_context` 来自用户上传资料的 Chroma 检索结果，用于让总计划
+    尽量贴合教材/PPT 中真实出现的章节和概念。
     """
 
     goal_payload = goal.model_dump()
+    if knowledge_context:
+        goal_payload["knowledge_context"] = knowledge_context
 
     async def planner_node(state: AgentState) -> AgentState:
         """向 Planner Agent 请求 `daily_plans` JSON 的 LangGraph 节点。"""
@@ -77,9 +83,14 @@ async def generate_plan(goal: GoalCreate) -> list[dict[str, Any]]:
         result = await llm.complete_json(
             system_prompt=(
                 "你是 Planner Agent。请为大学生期末复习生成结构化计划，"
+                "如果提供了课程资料上下文，请优先结合资料中的章节、概念和术语安排计划。"
                 "必须返回 JSON，字段包含 daily_plans。"
             ),
-            user_payload={"goal": state["goal"], "schema": _plan_schema_hint()},
+            user_payload={
+                "goal": state["goal"],
+                "knowledge_context": state["goal"].get("knowledge_context", []),
+                "schema": _plan_schema_hint(),
+            },
             fallback=fallback,
         )
         return {"plan": result}

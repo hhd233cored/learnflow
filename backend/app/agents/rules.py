@@ -45,8 +45,9 @@ def build_rule_based_plan(goal: dict) -> dict:
     """
 
     day_count = infer_day_count(goal)
-    topics = goal.get("key_topics") or DEFAULT_OS_TOPICS
+    topics = goal.get("key_topics") or _topics_from_material_context(goal) or DEFAULT_OS_TOPICS
     topic_pool = [*topics, *DEFAULT_OS_TOPICS]
+    material_note = _material_note(goal)
     start_date = date.today()
     daily_plans = []
 
@@ -56,10 +57,10 @@ def build_rule_based_plan(goal: dict) -> dict:
             objective = "整合高频考点、错题和薄弱概念，完成一次限时模拟。"
         elif index >= max(day_count - 2, 1):
             topic = "综合刷题与错题复盘"
-            objective = "用题目暴露知识漏洞，沉淀错题原因和答题模板。"
+            objective = f"用题目暴露知识漏洞，沉淀错题原因和答题模板。{material_note}"
         else:
             topic = topic_pool[index % len(topic_pool)]
-            objective = f"围绕「{topic}」建立核心概念框架，并完成基础题巩固。"
+            objective = f"围绕「{topic}」建立核心概念框架，并完成基础题巩固。{material_note}"
 
         daily_plans.append(
             {
@@ -78,6 +79,42 @@ def build_rule_based_plan(goal: dict) -> dict:
         ],
         "daily_plans": daily_plans,
     }
+
+
+def _topics_from_material_context(goal: dict) -> list[str]:
+    """从资料检索片段中提取少量可能的章节标题，作为规则兜底计划的主题。
+
+    这不是语义理解，只是让未配置 LLM 的本地 Demo 也能体现“资料参与规划”。
+    真正的章节理解仍然交给 Planner Agent 和大模型完成。
+    """
+
+    topics: list[str] = []
+    for hit in goal.get("knowledge_context") or []:
+        content = str(hit.get("content") or "")
+        for line in content.splitlines():
+            cleaned = line.strip(" #\t:-—")
+            if 4 <= len(cleaned) <= 40 and cleaned not in topics:
+                topics.append(cleaned)
+            if len(topics) >= 5:
+                return topics
+    return topics
+
+
+def _material_note(goal: dict) -> str:
+    """生成一段简短说明，让兜底计划也明确它参考了上传资料。"""
+
+    hits = goal.get("knowledge_context") or []
+    if not hits:
+        return ""
+    filenames = []
+    for hit in hits:
+        metadata = hit.get("metadata") or {}
+        filename = metadata.get("filename")
+        if filename and filename not in filenames:
+            filenames.append(filename)
+    if not filenames:
+        return " 结合上传资料中的相关章节。"
+    return f" 结合上传资料「{'、'.join(filenames[:2])}」中的相关章节。"
 
 
 def build_rule_based_tasks(goal: dict, plan: dict) -> dict:

@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from datetime import date
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import crud, models
@@ -7,9 +10,11 @@ from app.agents.llm import DeepSeekClient
 from app.db.session import get_db
 from app.schemas import (
     AdjustmentRequest,
+    ChatStreamRequest,
     CourseMaterialRead,
     GoalCreate,
     GoalRead,
+    GoalSummaryRead,
     JobRead,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
@@ -46,6 +51,31 @@ async def llm_health_check():
     return await DeepSeekClient().health_check()
 
 
+@router.post("/chat/stream")
+async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db)):
+    """AI 学习助手流式聊天接口。
+
+    前端聊天抽屉会把历史消息、当前 goal 和当前 day 传进来。后端会补充
+    学习目标、每日计划、任务状态和 Chroma 检索片段，再交给 DeepSeek
+    以文本流形式返回。
+    """
+
+    context = _chat_context(payload, db)
+    messages = [item.model_dump() for item in payload.messages[-12:]]
+    fallback = _fallback_chat_reply(payload, context)
+
+    stream = DeepSeekClient().stream_chat(
+        system_prompt=_chat_system_prompt(context),
+        messages=messages,
+        fallback=fallback,
+    )
+    return StreamingResponse(
+        stream,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @router.post("/goals", response_model=GoalRead, status_code=status.HTTP_201_CREATED)
 async def create_goal(payload: GoalCreate, db: Session = Depends(get_db)):
     """创建学习目标，并立即生成学习时间线。
@@ -57,6 +87,70 @@ async def create_goal(payload: GoalCreate, db: Session = Depends(get_db)):
     # 目标创建是第一版闭环入口：目标信息进入 Planner Agent 后会生成完整计划。
     daily_plans = await workflow.generate_plan(payload)
     return crud.create_goal_with_plan(db, payload, daily_plans)
+
+
+@router.get("/goals", response_model=list[GoalSummaryRead])
+def list_goals(db: Session = Depends(get_db)):
+    """列出历史学习计划摘要，供前端恢复和切换计划。"""
+
+    return crud.list_goal_summaries(db)
+
+
+@router.post(
+    "/goals/with-materials",
+    response_model=GoalRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_goal_with_materials(
+    title: str = Form(...),
+    exam_date: date = Form(...),
+    daily_minutes: int = Form(...),
+    current_level: str = Form(...),
+    key_topics: str = Form(""),
+    files: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db),
+):
+    """创建学习目标，并在生成计划前先处理上传资料。
+
+    这个接口服务于“目标输入 + 课程资料上传 + 生成计划”的一体化流程：
+    先创建 goal 获得 id，再把 PDF/PPT/Word 等资料写入该 goal 的 Chroma
+    collection，最后把检索到的资料上下文交给 Planner Agent 生成总计划。
+    """
+
+    payload = GoalCreate(
+        title=title,
+        exam_date=exam_date,
+        daily_minutes=daily_minutes,
+        current_level=current_level,
+        key_topics=_parse_key_topics(key_topics),
+    )
+    goal = crud.create_goal_only(db, payload, status="planning")
+
+    for upload in files or []:
+        if not upload.filename:
+            continue
+        material = None
+        try:
+            storage_path, filename, file_type = save_upload_file(upload, goal.id)
+            material = crud.create_course_material(
+                db,
+                goal_id=goal.id,
+                filename=filename,
+                file_type=file_type,
+                storage_path=storage_path,
+                chroma_collection=collection_name_for_goal(goal.id),
+            )
+            await build_material_knowledge_base(db, material)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            # 单个资料解析失败不阻塞计划生成；失败信息会保存在资料记录中。
+            if material is not None:
+                crud.mark_material_failed(db, material, str(exc))
+
+    knowledge_context = _knowledge_context_for_goal(goal.id, payload)
+    daily_plans = await workflow.generate_plan(payload, knowledge_context)
+    return crud.replace_goal_plans(db, goal, daily_plans)
 
 
 @router.post(
@@ -96,6 +190,17 @@ def read_goal(goal_id: int, db: Session = Depends(get_db)):
     return goal
 
 
+@router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_goal(goal_id: int, db: Session = Depends(get_db)):
+    """删除某个学习目标及其计划、任务、复盘和知识库 collection。"""
+
+    deleted = crud.delete_goal(db, goal_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Learning goal not found")
+    ChromaKnowledgeBase().delete_goal_collection(goal_id)
+    return None
+
+
 @router.post(
     "/goals/{goal_id}/materials/upload",
     response_model=CourseMaterialRead,
@@ -130,7 +235,7 @@ async def upload_course_material(
     )
 
     try:
-        return build_material_knowledge_base(db, material)
+        return await build_material_knowledge_base(db, material)
     except Exception as exc:
         return crud.mark_material_failed(db, material, str(exc))
 
@@ -403,6 +508,166 @@ def _review_payload(review: models.StudyReview) -> dict:
         "weak_points": review.weak_points,
         "suggestions": review.suggestions,
     }
+
+
+def _chat_context(payload: ChatStreamRequest, db: Session) -> str:
+    """组装聊天助手可见的学习上下文。
+
+    聊天不直接修改业务数据，只读取当前目标、选中计划、任务打卡状态，
+    并用最后一条用户消息检索 Chroma。上下文长度做了控制，避免 prompt
+    过长影响响应速度。
+    """
+
+    sections: list[str] = []
+    goal = crud.get_goal(db, payload.goal_id) if payload.goal_id else None
+    plan = crud.get_plan(db, payload.plan_id) if payload.plan_id else None
+    last_user_message = _last_user_message(payload)
+
+    if goal is not None:
+        sections.append(
+            "\n".join(
+                [
+                    "当前学习目标：",
+                    f"- 标题：{goal.title}",
+                    f"- 考试日期：{goal.exam_date}",
+                    f"- 每日可用时间：{goal.daily_minutes} 分钟",
+                    f"- 当前基础：{goal.current_level}",
+                    f"- 重点章节：{', '.join(goal.key_topics)}",
+                ]
+            )
+        )
+
+    if plan is not None:
+        tasks = crud.list_tasks(db, plan.id)
+        task_lines = [
+            f"- {item.title}（{item.status}，{item.estimated_minutes} 分钟）"
+            for item in tasks[:8]
+        ]
+        sections.append(
+            "\n".join(
+                [
+                    "当前选中的每日计划：",
+                    f"- Day {plan.day_index}：{plan.topic}",
+                    f"- 日期：{plan.plan_date}",
+                    f"- 目标：{plan.objective}",
+                    "当前任务：",
+                    *(task_lines or ["- 暂无已生成任务"]),
+                ]
+            )
+        )
+
+    knowledge_hits = _chat_knowledge_hits(goal, plan, last_user_message)
+    if knowledge_hits:
+        hit_lines = []
+        for index, hit in enumerate(knowledge_hits, start=1):
+            metadata = hit.get("metadata") or {}
+            summary = metadata.get("summary_zh") or ""
+            source = metadata.get("source") or metadata.get("filename") or "课程资料"
+            content = str(hit.get("content") or "")[:700]
+            hit_lines.append(
+                f"[资料 {index}] {source}\n中文摘要：{summary}\n片段：{content}"
+            )
+        sections.append("课程资料检索结果：\n" + "\n\n".join(hit_lines))
+
+    return "\n\n".join(sections)
+
+
+def _chat_system_prompt(context: str) -> str:
+    """构造学习助手的系统提示词。"""
+
+    return "\n".join(
+        [
+            "你是 StudyAgent 的 AI 学习助手，面向正在备考的大学生。",
+            "请用中文回答，结构清晰，尽量给出可执行的学习建议。",
+            "如果用户询问知识点，请先解释直觉，再给简短例子或记忆方法。",
+            "请使用 Markdown 组织答案；代码、命令和配置用 fenced code block。",
+            "数学公式请使用 LaTeX：行内公式用 \\(...\\)，独立公式用 \\[...\\]。",
+            "如果提供了当前计划、任务或课程资料上下文，请优先结合这些内容。",
+            "不要编造资料中没有的页码、公式编号或教材原句。",
+            "当前上下文如下：",
+            context or "暂无学习上下文。",
+        ]
+    )
+
+
+def _fallback_chat_reply(payload: ChatStreamRequest, context: str) -> str:
+    """没有 DeepSeek API Key 时的本地兜底回复。"""
+
+    question = _last_user_message(payload) or "这个问题"
+    if context:
+        return (
+            f"我先基于当前学习上下文回答：你问的是「{question}」。\n\n"
+            "建议你把它拆成三步处理：\n"
+            "1. 先回到当前 Day 的学习目标，确认这个问题属于哪个核心概念。\n"
+            "2. 再结合任务卡片，把概念变成一道小练习或一次主动复述。\n"
+            "3. 如果仍然卡住，把不理解的术语单独列出来，下一轮我可以继续帮你解释。\n\n"
+            "当前本地未配置 DeepSeek API Key，所以这是规则兜底回复；配置 Key 后会切换为真正的流式模型回答。"
+        )
+    return (
+        f"你问的是「{question}」。我建议先用一句话定义概念，再找一个例子验证理解。"
+        "当前本地未配置 DeepSeek API Key，所以这是规则兜底回复。"
+    )
+
+
+def _last_user_message(payload: ChatStreamRequest) -> str:
+    """取最近一条用户消息作为检索 query 和兜底回复依据。"""
+
+    for item in reversed(payload.messages):
+        if item.role == "user":
+            return item.content.strip()
+    return ""
+
+
+def _chat_knowledge_hits(
+    goal: models.LearningGoal | None,
+    plan: models.StudyPlan | None,
+    last_user_message: str,
+) -> list[dict]:
+    """为聊天助手检索少量课程资料片段。"""
+
+    goal_id = goal.id if goal is not None else plan.goal_id if plan is not None else None
+    if goal_id is None:
+        return []
+
+    query_parts = [last_user_message]
+    if plan is not None:
+        query_parts.extend([plan.topic, plan.objective])
+    elif goal is not None:
+        query_parts.extend([goal.title, *goal.key_topics])
+    query = " ".join(item for item in query_parts if item).strip()
+    if not query:
+        return []
+
+    try:
+        return ChromaKnowledgeBase().query(goal_id, query, top_k=3)
+    except Exception:
+        return []
+
+
+def _parse_key_topics(raw: str) -> list[str]:
+    """解析 multipart 表单里的重点章节字段。
+
+    前端用逗号分隔章节，后端统一清洗成字符串列表，便于复用 `GoalCreate`
+    的校验和后续 Agent 输入格式。
+    """
+
+    return [item.strip() for item in raw.replace("，", ",").split(",") if item.strip()]
+
+
+def _knowledge_context_for_goal(goal_id: int, payload: GoalCreate) -> list[dict]:
+    """为 Planner Agent 检索目标级课程资料上下文。
+
+    总计划还没有具体 day/topic，因此用学习目标标题和重点章节作为查询词。
+    如果用户没有上传资料或 Chroma 暂时不可用，返回空列表，不影响普通计划生成。
+    """
+
+    query = " ".join([payload.title, *payload.key_topics]).strip()
+    if not query:
+        return []
+    try:
+        return ChromaKnowledgeBase().query(goal_id, query, top_k=6)
+    except Exception:
+        return []
 
 
 def _knowledge_context_for_plan(plan: models.StudyPlan) -> list[dict]:

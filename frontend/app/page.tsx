@@ -1,23 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   CalendarDays,
   Check,
   Clock3,
   FileText,
+  FolderOpen,
   Loader2,
   RefreshCcw,
   Search,
   Sparkles,
-  Target
+  Target,
+  Trash2
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { ChatDrawer } from "@/components/chat-drawer";
 import type {
   Adjustment,
   CourseMaterial,
   GoalDetail,
+  GoalSummary,
   Job,
   KnowledgeSearchHit,
   Review,
@@ -42,6 +46,8 @@ import { cn } from "@/lib/utils";
 const POLL_INTERVAL_MS = 1000;
 const MAX_PLAN_POLL_COUNT = 120;
 const USE_ASYNC_JOBS = process.env.NEXT_PUBLIC_USE_ASYNC_JOBS === "true";
+const LAST_GOAL_ID_KEY = "studyagent:lastGoalId";
+const SELECTED_PLAN_PREFIX = "studyagent:selectedPlanId:";
 
 const statusLabels: Record<string, string> = {
   pending: "未开始",
@@ -105,6 +111,30 @@ function getPlanJobLabel(job: Job | null) {
   return "正在生成学习计划";
 }
 
+function metadataString(hit: KnowledgeSearchHit, key: string) {
+  const value = hit.metadata[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function metadataTerms(hit: KnowledgeSearchHit) {
+  const terms = hit.metadata.key_terms;
+  if (!Array.isArray(terms)) {
+    return [];
+  }
+  return terms
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return "";
+      }
+      const record = item as Record<string, unknown>;
+      const source = typeof record.source === "string" ? record.source : "";
+      const zh = typeof record.zh === "string" ? record.zh : "";
+      return zh && source && zh !== source ? `${source} / ${zh}` : source || zh;
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
 function createLocalPlanJob(progress = 8): Job {
   return {
     id: 0,
@@ -115,18 +145,25 @@ function createLocalPlanJob(progress = 8): Job {
   };
 }
 
+function selectedPlanStorageKey(goalId: number) {
+  return `${SELECTED_PLAN_PREFIX}${goalId}`;
+}
+
 export default function Home() {
+  const [goalSummaries, setGoalSummaries] = useState<GoalSummary[]>([]);
   const [goal, setGoal] = useState<GoalDetail | null>(null);
   const [selectedPlanId, setSelectedPlanId] = useState<number | null>(null);
   const [taskCache, setTaskCache] = useState<Record<number, StudyTask[]>>({});
   const [review, setReview] = useState<Review | null>(null);
   const [adjustment, setAdjustment] = useState<Adjustment | null>(null);
   const [materials, setMaterials] = useState<CourseMaterial[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
   const [knowledgeQuery, setKnowledgeQuery] = useState("PV 操作 信号量");
   const [feedback, setFeedback] = useState("PV 操作题错得比较多，信号量含义有点混。");
   const [planJob, setPlanJob] = useState<Job | null>(null);
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
+  const [loadingGoals, setLoadingGoals] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [form, setForm] = useState({
@@ -169,7 +206,13 @@ export default function Home() {
   const planProgress = planJob?.progress ?? 0;
   const isPlanGenerating =
     planJob?.status === "pending" || planJob?.status === "running";
-  const isBusy = loadingStep !== null || isPlanGenerating;
+  const isBusy = loadingStep !== null || isPlanGenerating || loadingGoals;
+
+  useEffect(() => {
+    void loadGoalSummaries(true);
+    // 只在页面首次加载时恢复历史计划。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function run<T>(
     step: string,
@@ -237,11 +280,107 @@ export default function Home() {
     }
   }
 
-  async function selectPlan(plan: StudyPlan) {
+  async function selectPlan(plan: StudyPlan, ownerGoalId = goal?.id) {
     setSelectedPlanId(plan.id);
+    if (ownerGoalId) {
+      window.localStorage.setItem(LAST_GOAL_ID_KEY, String(ownerGoalId));
+      window.localStorage.setItem(selectedPlanStorageKey(ownerGoalId), String(plan.id));
+    }
     setReview(null);
     setAdjustment(null);
     await ensureTasksForPlan(plan);
+  }
+
+  async function loadGoalSummaries(restoreLastGoal = false) {
+    setLoadingGoals(true);
+    setError(null);
+    try {
+      const summaries = await api.listGoals();
+      setGoalSummaries(summaries);
+
+      if (restoreLastGoal && summaries.length > 0) {
+        const storedGoalId = Number(window.localStorage.getItem(LAST_GOAL_ID_KEY));
+        const target = summaries.find((item) => item.id === storedGoalId) ?? summaries[0];
+        await openGoal(target.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "历史计划加载失败");
+    } finally {
+      setLoadingGoals(false);
+    }
+  }
+
+  async function openGoal(goalId: number) {
+    setLoadingStep(`goal-${goalId}`);
+    setError(null);
+    try {
+      const detail = await api.getGoal(goalId);
+      const storedPlanId = Number(
+        window.localStorage.getItem(selectedPlanStorageKey(goalId))
+      );
+      const orderedPlans = sortPlans(detail.plans);
+      const plan =
+        orderedPlans.find((item) => item.id === storedPlanId) ?? orderedPlans[0] ?? null;
+
+      setGoal(detail);
+      setTaskCache({});
+      setReview(null);
+      setAdjustment(null);
+      setKnowledgeHits([]);
+      setSelectedFiles([]);
+      window.localStorage.setItem(LAST_GOAL_ID_KEY, String(goalId));
+
+      const nextMaterials = await api.listMaterials(goalId);
+      setMaterials(nextMaterials);
+
+      if (plan) {
+        await selectPlan(plan, detail.id);
+      } else {
+        setSelectedPlanId(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "计划加载失败");
+    } finally {
+      setLoadingStep(null);
+    }
+  }
+
+  async function handleDeleteGoal(goalId: number) {
+    const confirmed = window.confirm("确定删除这个学习计划吗？计划、任务和知识库索引都会被移除。");
+    if (!confirmed) {
+      return;
+    }
+
+    setLoadingStep(`delete-${goalId}`);
+    setError(null);
+    try {
+      await api.deleteGoal(goalId);
+      window.localStorage.removeItem(selectedPlanStorageKey(goalId));
+      if (goal?.id === goalId) {
+        window.localStorage.removeItem(LAST_GOAL_ID_KEY);
+        setGoal(null);
+        setSelectedPlanId(null);
+        setTaskCache({});
+        setReview(null);
+        setAdjustment(null);
+        setMaterials([]);
+        setKnowledgeHits([]);
+      }
+
+      const nextSummaries = await api.listGoals();
+      setGoalSummaries(nextSummaries);
+      if (goal?.id === goalId && nextSummaries.length > 0) {
+        await openGoal(nextSummaries[0].id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除计划失败");
+    } finally {
+      setLoadingStep(null);
+    }
+  }
+
+  function handleGoalFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    setSelectedFiles(Array.from(event.target.files ?? []));
   }
 
   async function handleCreateGoal() {
@@ -272,7 +411,7 @@ export default function Home() {
     try {
       let createdGoal: GoalDetail;
 
-      if (USE_ASYNC_JOBS) {
+      if (USE_ASYNC_JOBS && selectedFiles.length === 0) {
         const job = await api.createGoalAsync(payload);
         setPlanJob(job);
 
@@ -299,7 +438,7 @@ export default function Home() {
         }, 700);
 
         try {
-          createdGoal = await api.createGoal(payload);
+          createdGoal = await api.createGoalWithMaterials(payload, selectedFiles);
         } finally {
           window.clearInterval(timer);
         }
@@ -312,10 +451,13 @@ export default function Home() {
       }
 
       setGoal(createdGoal);
+      setMaterials(await api.listMaterials(createdGoal.id));
+      await loadGoalSummaries(false);
+      window.localStorage.setItem(LAST_GOAL_ID_KEY, String(createdGoal.id));
 
       const firstPlan = sortPlans(createdGoal.plans)[0];
       if (firstPlan) {
-        await selectPlan(firstPlan);
+        await selectPlan(firstPlan, createdGoal.id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "计划生成失败");
@@ -425,13 +567,87 @@ export default function Home() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
+                <FolderOpen className="h-5 w-5 text-primary" aria-hidden="true" />
+                我的学习计划
+              </CardTitle>
+              <CardDescription>
+                已生成的计划会保存在本地数据库，点击即可继续学习。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {loadingGoals ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  正在加载历史计划
+                </div>
+              ) : goalSummaries.length > 0 ? (
+                <div className="space-y-2">
+                  {goalSummaries.map((item) => {
+                    const active = goal?.id === item.id;
+                    return (
+                      <div
+                        className={cn(
+                          "rounded-md border bg-background p-3",
+                          active && "border-primary bg-teal-50"
+                        )}
+                        key={item.id}
+                      >
+                        <div className="flex items-start gap-2">
+                          <button
+                            className="min-w-0 flex-1 text-left"
+                            disabled={isBusy}
+                            onClick={() => openGoal(item.id)}
+                          >
+                            <div className="flex items-center gap-2">
+                              <h3 className="truncate text-sm font-semibold">
+                                {item.title}
+                              </h3>
+                              {active ? <Badge tone="teal">当前</Badge> : null}
+                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              考试 {item.exam_date} · {item.plan_count} 天计划
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              资料 {item.material_count} 份 · {item.status}
+                            </p>
+                          </button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="删除计划"
+                            disabled={isBusy}
+                            onClick={() => handleDeleteGoal(item.id)}
+                          >
+                            {loadingStep === `delete-${item.id}` ? (
+                              <Loader2
+                                className="h-4 w-4 animate-spin"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <Trash2 className="h-4 w-4" aria-hidden="true" />
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyState text="还没有历史计划，生成后会自动出现在这里。" />
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
                 <Target className="h-5 w-5 text-primary" aria-hidden="true" />
                 创建学习目标
               </CardTitle>
               <CardDescription>
                 {USE_ASYNC_JOBS
-                  ? "提交后会进入后台任务队列，完成后自动展示 Day 1 任务。"
-                  : "本地模式会同步生成计划，并用前端进度条展示生成过程。"}
+                  ? "未上传资料时走后台队列；上传资料时会先同步建库再生成计划。"
+                  : "可先上传课程资料，本地模式会先建库再生成计划。"}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -509,6 +725,34 @@ export default function Home() {
                     }))
                   }
                 />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="goalMaterials">课程资料</Label>
+                <Input
+                  id="goalMaterials"
+                  type="file"
+                  multiple
+                  accept=".pdf,.docx,.pptx,.txt,.md"
+                  disabled={isBusy}
+                  onChange={handleGoalFiles}
+                />
+                {selectedFiles.length > 0 ? (
+                  <div className="space-y-2 rounded-md border bg-background p-3">
+                    {selectedFiles.map((file) => (
+                      <div
+                        className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
+                        key={`${file.name}-${file.lastModified}`}
+                      >
+                        <span className="truncate">{file.name}</span>
+                        <span>{Math.max(1, Math.round(file.size / 1024))} KB</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    可选：上传 PDF、PPTX、DOCX、TXT 或 MD，计划会优先参考资料内容。
+                  </p>
+                )}
               </div>
               <Button
                 className="w-full"
@@ -621,12 +865,35 @@ export default function Home() {
                 <div className="space-y-2">
                   {knowledgeHits.map((hit, index) => (
                     <div className="rounded-md border bg-background p-3" key={index}>
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        {metadataString(hit, "source_lang") ? (
+                          <Badge tone="neutral">
+                            {metadataString(hit, "source_lang")}
+                          </Badge>
+                        ) : null}
+                        {metadataString(hit, "source") ? (
+                          <span className="text-xs text-muted-foreground">
+                            {metadataString(hit, "source")}
+                          </span>
+                        ) : null}
+                      </div>
+                      {metadataString(hit, "summary_zh") ? (
+                        <p className="mb-2 text-sm leading-6">
+                          {metadataString(hit, "summary_zh")}
+                        </p>
+                      ) : null}
                       <p className="line-clamp-4 text-sm leading-6 text-muted-foreground">
                         {hit.content}
                       </p>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        {String(hit.metadata.source ?? hit.metadata.filename ?? "material")}
-                      </p>
+                      {metadataTerms(hit).length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {metadataTerms(hit).map((term) => (
+                            <Badge tone="teal" key={term}>
+                              {term}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -885,6 +1152,7 @@ export default function Home() {
           </Card>
         </div>
       </section>
+      <ChatDrawer goal={goal} selectedPlan={selectedPlan} />
     </main>
   );
 }

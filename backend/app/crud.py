@@ -102,6 +102,51 @@ def get_goal(db: Session, goal_id: int) -> models.LearningGoal | None:
     return db.scalars(stmt).first()
 
 
+def list_goal_summaries(db: Session) -> list[dict]:
+    """列出所有学习目标的轻量摘要。
+
+    前端“我的学习计划”只需要摘要信息，不需要一次性返回所有每日计划和任务，
+    这样刷新首页时会更轻。
+    """
+
+    stmt = (
+        select(models.LearningGoal)
+        .options(
+            selectinload(models.LearningGoal.plans),
+            selectinload(models.LearningGoal.materials),
+        )
+        .order_by(models.LearningGoal.updated_at.desc())
+    )
+    goals = list(db.scalars(stmt).all())
+    return [
+        {
+            "id": goal.id,
+            "title": goal.title,
+            "exam_date": goal.exam_date,
+            "daily_minutes": goal.daily_minutes,
+            "current_level": goal.current_level,
+            "key_topics": goal.key_topics,
+            "status": goal.status,
+            "plan_count": len(goal.plans),
+            "material_count": len(goal.materials),
+            "created_at": goal.created_at,
+            "updated_at": goal.updated_at,
+        }
+        for goal in goals
+    ]
+
+
+def delete_goal(db: Session, goal_id: int) -> bool:
+    """删除学习目标及其关系型数据库中的关联数据。"""
+
+    goal = db.get(models.LearningGoal, goal_id)
+    if goal is None:
+        return False
+    db.delete(goal)
+    db.commit()
+    return True
+
+
 def get_plan(db: Session, plan_id: int) -> models.StudyPlan | None:
     """查询某一天的学习计划，并预加载 API 需要的关联数据。
 

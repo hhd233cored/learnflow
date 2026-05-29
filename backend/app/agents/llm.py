@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -130,6 +131,61 @@ class DeepSeekClient:
             # 后续可以接入日志和可观测性系统。
             return fallback
 
+    async def stream_chat(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, str]],
+        fallback: str,
+    ) -> AsyncIterator[str]:
+        """以文本流形式请求 DeepSeek 聊天接口。
+
+        前端聊天抽屉需要边生成边展示，因此这里直接解析 DeepSeek 的
+        `stream=true` SSE 响应，并把增量文本 chunk 透传给 FastAPI。
+        如果没有配置 API Key 或请求失败，就返回本地兜底文本流。
+        """
+
+        if not self.settings.deepseek_api_key:
+            async for chunk in _fallback_stream(fallback):
+                yield chunk
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.settings.deepseek_base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.deepseek_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.settings.deepseek_model,
+                        "stream": True,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            *messages,
+                        ],
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line.removeprefix("data:").strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            payload = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = payload.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content")
+                        if content:
+                            yield content
+        except Exception:
+            async for chunk in _fallback_stream(fallback):
+                yield chunk
+
 
 def _parse_json_object(content: str, fallback: dict[str, Any]) -> dict[str, Any]:
     """从模型输出中解析 JSON 对象。
@@ -148,3 +204,11 @@ def _parse_json_object(content: str, fallback: dict[str, Any]) -> dict[str, Any]
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             return fallback
+
+
+async def _fallback_stream(text: str) -> AsyncIterator[str]:
+    """把兜底文本拆成小片段，模拟流式输出体验。"""
+
+    step = 18
+    for index in range(0, len(text), step):
+        yield text[index : index + step]

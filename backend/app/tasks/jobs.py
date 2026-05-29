@@ -47,7 +47,7 @@ def parse_material_task(job_id: int, material_id: int) -> dict:
             result_json={"material_id": material.id, "stage": "parsing"},
         )
 
-        material = build_material_knowledge_base(db, material)
+        material = asyncio.run(build_material_knowledge_base(db, material))
 
         result = {
             "material_id": material.id,
