@@ -37,6 +37,49 @@ export type StudyTask = {
   status: string;
 };
 
+export type QuizQuestion = {
+  id: string;
+  type: "single_choice" | "short_answer";
+  question: string;
+  options: string[];
+  correct_answer?: string | null;
+  reference_answer?: string | null;
+  explanation: string;
+};
+
+export type QuizAnswerItem = {
+  question_id: string;
+  answer: string;
+};
+
+export type QuizResultItem = {
+  question_id: string;
+  is_correct: boolean;
+  score: number;
+  feedback: string;
+  correct_answer?: string | null;
+};
+
+export type QuizResult = {
+  score: number;
+  items: QuizResultItem[];
+  summary: string;
+};
+
+export type TaskQuiz = {
+  id: number;
+  task_id: number;
+  plan_id: number;
+  goal_id: number;
+  status: string;
+  source_mode: "rag" | "llm_fallback";
+  questions: QuizQuestion[];
+  answers: QuizAnswerItem[];
+  result?: QuizResult | null;
+  created_at: string;
+  submitted_at?: string | null;
+};
+
 export type Review = {
   id: number;
   completion_rate: number;
@@ -192,6 +235,20 @@ export const api = {
     return request<StudyTask>(`/tasks/${taskId}/status`, {
       method: "PATCH",
       body: JSON.stringify({ status })
+    });
+  },
+
+  generateTaskQuiz(taskId: number, regenerate = false) {
+    return request<TaskQuiz>(`/tasks/${taskId}/quiz`, {
+      method: "POST",
+      body: JSON.stringify({ regenerate })
+    });
+  },
+
+  submitTaskQuiz(quizId: number, answers: QuizAnswerItem[]) {
+    return request<TaskQuiz>(`/quizzes/${quizId}/submit`, {
+      method: "POST",
+      body: JSON.stringify({ answers })
     });
   },
 

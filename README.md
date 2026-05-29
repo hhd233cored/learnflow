@@ -109,6 +109,7 @@ NEXT_PUBLIC_USE_ASYNC_JOBS=false
 - 任务打卡与完成率统计
 - AI 复盘总结
 - 根据完成率和薄弱点调整明日计划
+- 每个任务支持 AI 生成 3 道小测题，并在弹窗中完成答题和基础批改
 - 右侧 AI 学习助手聊天抽屉，支持流式输出和当前计划上下文
 - 我的学习计划：刷新后可恢复历史计划，支持切换和删除
 
@@ -137,6 +138,8 @@ POST /api/v1/goals/{goal_id}/materials/upload
 GET  /api/v1/goals/{goal_id}/materials
 GET  /api/v1/materials/{material_id}
 POST /api/v1/goals/{goal_id}/knowledge/search
+POST /api/v1/tasks/{task_id}/quiz
+POST /api/v1/quizzes/{quiz_id}/submit
 ```
 
 上传示例：

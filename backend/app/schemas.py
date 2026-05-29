@@ -93,6 +93,74 @@ class TaskStatusUpdate(BaseModel):
     status: Literal["pending", "partial", "done", "missed"]
 
 
+class QuizGenerateRequest(BaseModel):
+    """生成任务小测的请求体。
+
+    默认复用已生成的小测，避免用户反复打开弹窗时重复消耗 LLM 调用。
+    """
+
+    regenerate: bool = False
+
+
+class QuizQuestion(BaseModel):
+    """任务小测中的单道题。"""
+
+    id: str
+    type: Literal["single_choice", "short_answer"]
+    question: str
+    options: list[str] = Field(default_factory=list)
+    correct_answer: str | None = None
+    reference_answer: str | None = None
+    explanation: str = ""
+
+
+class QuizAnswerItem(BaseModel):
+    """用户提交的单题答案。"""
+
+    question_id: str
+    answer: str = ""
+
+
+class QuizSubmitRequest(BaseModel):
+    """提交任务小测答案的请求体。"""
+
+    answers: list[QuizAnswerItem] = Field(default_factory=list)
+
+
+class QuizResultItem(BaseModel):
+    """单题批改结果。"""
+
+    question_id: str
+    is_correct: bool
+    score: int = Field(ge=0, le=100)
+    feedback: str
+    correct_answer: str | None = None
+
+
+class QuizResultRead(BaseModel):
+    """任务小测的整体批改结果。"""
+
+    score: int = Field(ge=0, le=100)
+    items: list[QuizResultItem]
+    summary: str
+
+
+class TaskQuizRead(BaseModel):
+    """任务小测详情。"""
+
+    id: int
+    task_id: int
+    plan_id: int
+    goal_id: int
+    status: str
+    source_mode: Literal["rag", "llm_fallback"]
+    questions: list[QuizQuestion]
+    answers: list[QuizAnswerItem] = Field(default_factory=list)
+    result: QuizResultRead | None = None
+    created_at: datetime
+    submitted_at: datetime | None = None
+
+
 class ReviewCreate(BaseModel):
     """生成每日复盘的请求体。"""
 

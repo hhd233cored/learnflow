@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
+  BrainCircuit,
   CalendarDays,
   Check,
   Clock3,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { ChatDrawer } from "@/components/chat-drawer";
+import { TaskQuizDialog } from "@/components/task-quiz-dialog";
 import type {
   Adjustment,
   CourseMaterial,
@@ -161,6 +163,7 @@ export default function Home() {
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
   const [knowledgeQuery, setKnowledgeQuery] = useState("PV 操作 信号量");
   const [feedback, setFeedback] = useState("PV 操作题错得比较多，信号量含义有点混。");
+  const [quizTask, setQuizTask] = useState<StudyTask | null>(null);
   const [planJob, setPlanJob] = useState<Job | null>(null);
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
   const [loadingGoals, setLoadingGoals] = useState(false);
@@ -1045,6 +1048,19 @@ export default function Home() {
                                   >
                                     未完成
                                   </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setQuizTask(task)}
+                                    disabled={selectedTaskLoading}
+                                    title="开始答题"
+                                  >
+                                    <BrainCircuit
+                                      className="h-3.5 w-3.5"
+                                      aria-hidden="true"
+                                    />
+                                    开始答题
+                                  </Button>
                                 </div>
                               </div>
                             ))}
@@ -1152,6 +1168,11 @@ export default function Home() {
           </Card>
         </div>
       </section>
+      <TaskQuizDialog
+        open={Boolean(quizTask)}
+        task={quizTask}
+        onClose={() => setQuizTask(null)}
+      />
       <ChatDrawer goal={goal} selectedPlan={selectedPlan} />
     </main>
   );

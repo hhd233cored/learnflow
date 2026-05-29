@@ -100,6 +100,38 @@ class StudyTask(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="pending")
 
     plan: Mapped[StudyPlan] = relationship(back_populates="tasks")
+    quizzes: Mapped[list["TaskQuiz"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class TaskQuiz(TimestampMixin, Base):
+    """某个学习任务对应的轻量级小测。
+
+    Demo 版不拆题库、答案、批改明细多张表，而是把 3 道题、用户答案和批改结果
+    存成 JSON。这样接口和前端实现更轻，后续如果要做正式题库再迁移成规范表结构。
+    """
+
+    __tablename__ = "task_quizzes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("study_tasks.id"), nullable=False)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("study_plans.id"), nullable=False)
+    goal_id: Mapped[int] = mapped_column(ForeignKey("learning_goals.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="generated")
+    source_mode: Mapped[str] = mapped_column(String(30), default="llm_fallback")
+    questions_json: Mapped[list[dict]] = mapped_column(
+        MutableList.as_mutable(json_column())
+    )
+    answers_json: Mapped[list[dict] | None] = mapped_column(
+        MutableList.as_mutable(json_column()), nullable=True
+    )
+    result_json: Mapped[dict | None] = mapped_column(
+        MutableDict.as_mutable(json_column()), nullable=True
+    )
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    task: Mapped[StudyTask] = relationship(back_populates="quizzes")
 
 
 class StudyReview(TimestampMixin, Base):

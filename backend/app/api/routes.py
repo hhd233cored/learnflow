@@ -20,14 +20,18 @@ from app.schemas import (
     KnowledgeSearchResponse,
     LLMHealthRead,
     PlanAdjustmentRead,
+    QuizGenerateRequest,
+    QuizSubmitRequest,
     ReviewCreate,
     StudyReviewRead,
     StudyTaskRead,
+    TaskQuizRead,
     TaskStatusUpdate,
 )
 from app.services.knowledge_base import ChromaKnowledgeBase, collection_name_for_goal
 from app.services.material_pipeline import build_material_knowledge_base
 from app.services.materials import save_upload_file
+from app.services.quiz import generate_quiz_for_task, grade_quiz_answers
 from app.tasks.jobs import generate_goal_plan_task, parse_material_task
 
 router = APIRouter(prefix="/api/v1")
@@ -377,6 +381,65 @@ def update_task_status(
     return task
 
 
+@router.post("/tasks/{task_id}/quiz", response_model=TaskQuizRead)
+async def generate_task_quiz(
+    task_id: int,
+    payload: QuizGenerateRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """为某个任务生成或复用 3 道小测题。
+
+    接口优先复用最近一次小测，避免用户反复打开弹窗时重复生成；需要重新出题时，
+    前端可以传入 `{"regenerate": true}`。
+    """
+
+    request = payload or QuizGenerateRequest()
+    task = crud.get_task_with_context(db, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    existing = crud.latest_quiz_for_task(db, task_id)
+    if existing is not None and not request.regenerate:
+        return _quiz_payload(existing)
+
+    generated = await generate_quiz_for_task(task)
+    quiz = crud.create_task_quiz(
+        db,
+        task=task,
+        questions=generated["questions"],
+        source_mode=generated["source_mode"],
+    )
+    return _quiz_payload(quiz)
+
+
+@router.get("/tasks/{task_id}/quiz", response_model=TaskQuizRead)
+def read_task_quiz(task_id: int, db: Session = Depends(get_db)):
+    """读取某个任务最近一次生成的小测。"""
+
+    quiz = crud.latest_quiz_for_task(db, task_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Task quiz not found")
+    return _quiz_payload(quiz)
+
+
+@router.post("/quizzes/{quiz_id}/submit", response_model=TaskQuizRead)
+async def submit_task_quiz(
+    quiz_id: int,
+    payload: QuizSubmitRequest,
+    db: Session = Depends(get_db),
+):
+    """提交任务小测答案并返回基础批改结果。"""
+
+    quiz = crud.get_quiz(db, quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Task quiz not found")
+
+    answers = [item.model_dump() for item in payload.answers]
+    result = await grade_quiz_answers(quiz.questions_json, answers)
+    updated = crud.submit_task_quiz(db, quiz, answers, result)
+    return _quiz_payload(updated)
+
+
 @router.post("/plans/{plan_id}/review", response_model=StudyReviewRead)
 async def create_review(
     plan_id: int, payload: ReviewCreate, db: Session = Depends(get_db)
@@ -459,6 +522,27 @@ def _get_goal_or_404(db: Session, goal_id: int) -> models.LearningGoal:
     if goal is None:
         raise HTTPException(status_code=404, detail="Learning goal not found")
     return goal
+
+
+def _quiz_payload(quiz: models.TaskQuiz) -> dict:
+    """把 TaskQuiz ORM 对象转换成前端需要的响应结构。"""
+
+    source_mode = (
+        quiz.source_mode if quiz.source_mode in {"rag", "llm_fallback"} else "llm_fallback"
+    )
+    return {
+        "id": quiz.id,
+        "task_id": quiz.task_id,
+        "plan_id": quiz.plan_id,
+        "goal_id": quiz.goal_id,
+        "status": quiz.status,
+        "source_mode": source_mode,
+        "questions": quiz.questions_json or [],
+        "answers": quiz.answers_json or [],
+        "result": quiz.result_json,
+        "created_at": quiz.created_at,
+        "submitted_at": quiz.submitted_at,
+    }
 
 
 def _goal_payload(goal: models.LearningGoal) -> dict:

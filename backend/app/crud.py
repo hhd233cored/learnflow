@@ -174,6 +174,24 @@ def list_tasks(db: Session, plan_id: int) -> list[models.StudyTask]:
     return list(db.scalars(stmt).all())
 
 
+def get_task_with_context(db: Session, task_id: int) -> models.StudyTask | None:
+    """读取任务，并预加载生成小测所需的计划、目标和已有小测。
+
+    Quiz Agent 需要知道任务所属的 Day、学习目标和重点章节；预加载这些关系可以
+    避免路由层在 session 关闭后触发懒加载。
+    """
+
+    stmt = (
+        select(models.StudyTask)
+        .where(models.StudyTask.id == task_id)
+        .options(
+            selectinload(models.StudyTask.plan).selectinload(models.StudyPlan.goal),
+            selectinload(models.StudyTask.quizzes),
+        )
+    )
+    return db.scalars(stmt).first()
+
+
 def replace_tasks(db: Session, plan_id: int, tasks: list[dict]) -> list[models.StudyTask]:
     """替换某一天计划下的所有任务。
 
@@ -181,7 +199,17 @@ def replace_tasks(db: Session, plan_id: int, tasks: list[dict]) -> list[models.S
     也避免用户多次点击“生成今日任务”后出现重复任务卡片。
     """
 
-    # 重新生成任务时先删除旧任务，避免同一天不断累积重复卡片。
+    # 重新生成任务时先删除旧任务和对应小测，避免同一天不断累积重复卡片。
+    # 这里使用 bulk delete，ORM 级联不会自动触发，因此要先清理 task_quizzes。
+    task_ids = list(
+        db.scalars(
+            select(models.StudyTask.id).where(models.StudyTask.plan_id == plan_id)
+        ).all()
+    )
+    if task_ids:
+        db.query(models.TaskQuiz).filter(models.TaskQuiz.task_id.in_(task_ids)).delete(
+            synchronize_session=False
+        )
     db.query(models.StudyTask).filter(models.StudyTask.plan_id == plan_id).delete()
     for item in tasks:
         db.add(
@@ -212,6 +240,65 @@ def update_task_status(
     db.commit()
     db.refresh(task)
     return task
+
+
+def latest_quiz_for_task(db: Session, task_id: int) -> models.TaskQuiz | None:
+    """查询某个任务最近一次生成的小测。"""
+
+    stmt = (
+        select(models.TaskQuiz)
+        .where(models.TaskQuiz.task_id == task_id)
+        .order_by(models.TaskQuiz.created_at.desc())
+    )
+    return db.scalars(stmt).first()
+
+
+def create_task_quiz(
+    db: Session,
+    task: models.StudyTask,
+    questions: list[dict],
+    source_mode: str,
+) -> models.TaskQuiz:
+    """保存任务级小测。
+
+    Demo 版按任务生成 3 道题，题目 JSON 直接写入 task_quizzes，便于前端快速展示。
+    """
+
+    quiz = models.TaskQuiz(
+        task_id=task.id,
+        plan_id=task.plan_id,
+        goal_id=task.plan.goal_id,
+        status="generated",
+        source_mode=source_mode,
+        questions_json=questions,
+    )
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+    return quiz
+
+
+def get_quiz(db: Session, quiz_id: int) -> models.TaskQuiz | None:
+    """根据 id 查询任务小测。"""
+
+    return db.get(models.TaskQuiz, quiz_id)
+
+
+def submit_task_quiz(
+    db: Session,
+    quiz: models.TaskQuiz,
+    answers: list[dict],
+    result: dict,
+) -> models.TaskQuiz:
+    """保存用户答案和批改结果。"""
+
+    quiz.answers_json = answers
+    quiz.result_json = result
+    quiz.status = "submitted"
+    quiz.submitted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(quiz)
+    return quiz
 
 
 def create_review(
