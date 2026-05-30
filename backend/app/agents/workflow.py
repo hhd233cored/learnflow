@@ -80,14 +80,17 @@ async def generate_plan(
         """向 Planner Agent 请求 `daily_plans` JSON 的 LangGraph 节点。"""
 
         fallback = build_rule_based_plan(state["goal"])
+        planned_days = len(fallback["daily_plans"])
         result = await llm.complete_json(
             system_prompt=(
-                "你是 Planner Agent。请为大学生期末复习生成结构化计划，"
+                "你是 Planner Agent。请为大学生学习目标生成结构化计划，"
+                "目标可能是考试倒计时，也可能是固定周期学完一门课。"
                 "如果提供了课程资料上下文，请优先结合资料中的章节、概念和术语安排计划。"
-                "必须返回 JSON，字段包含 daily_plans。"
+                f"必须严格生成 {planned_days} 天计划，并返回 JSON，字段包含 daily_plans。"
             ),
             user_payload={
                 "goal": state["goal"],
+                "planned_days": planned_days,
                 "knowledge_context": state["goal"].get("knowledge_context", []),
                 "schema": _plan_schema_hint(),
             },
@@ -218,26 +221,30 @@ def _normalize_daily_plans(raw: dict[str, Any], fallback: list[dict]) -> list[di
     if not isinstance(items, list) or not items:
         return fallback
 
+    expected_count = max(len(fallback), 1)
     normalized = []
-    for index, item in enumerate(items[:14], start=1):
+    for index, item in enumerate(items[:expected_count], start=1):
         try:
-            plan_date = item.get("plan_date") or fallback[min(index - 1, len(fallback) - 1)][
-                "plan_date"
-            ]
+            fallback_item = fallback[min(index - 1, len(fallback) - 1)]
+            plan_date = item.get("plan_date") or fallback_item["plan_date"]
             if isinstance(plan_date, str):
                 plan_date = date.fromisoformat(plan_date[:10])
             normalized.append(
                 {
                     "day_index": int(item.get("day_index", index)),
                     "plan_date": plan_date,
-                    "topic": str(item.get("topic") or fallback[index - 1]["topic"])[:200],
+                    "topic": str(item.get("topic") or fallback_item["topic"])[:200],
                     "objective": str(
-                        item.get("objective") or fallback[index - 1]["objective"]
+                        item.get("objective") or fallback_item["objective"]
                     ),
                 }
             )
         except Exception:
             return fallback
+    # LLM 有时会少返回几天；为了保证“30 天计划”等固定周期目标不缩水，
+    # 缺失部分直接补上规则兜底计划。
+    if len(normalized) < len(fallback):
+        normalized.extend(fallback[len(normalized):])
     return normalized or fallback
 
 

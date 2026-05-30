@@ -4,8 +4,8 @@ import "katex/dist/katex.min.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "StudyAgent",
-  description: "AI 学习执行官"
+  title: "learnflow",
+  description: "LearnFlow"
 };
 
 export default function RootLayout({

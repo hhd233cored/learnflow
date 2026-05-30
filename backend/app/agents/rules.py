@@ -17,23 +17,27 @@ DEFAULT_OS_TOPICS = [
 
 
 def infer_day_count(goal: dict) -> int:
-    """从标题或考试日期推断一个适合 Demo 的计划天数。
+    """从目标模式、标题或考试日期推断计划天数。
 
-    这样可以让第一版足够实用：天数足够展示计划，但不会多到让现场演示
-    的界面过于拥挤。
+    固定周期模式优先使用用户明确填写的 `duration_days`。考试模式保留
+    原来的“考试日期 - 今天”逻辑；标题中的“10 天/30 天”作为兼容兜底。
     """
+
+    duration_days = goal.get("duration_days")
+    if goal.get("goal_type") == "duration" and duration_days:
+        return min(max(int(duration_days), 3), 120)
 
     title = goal.get("title", "")
     match = re.search(r"(\d+)\s*天", title)
     if match:
-        return min(max(int(match.group(1)), 3), 14)
+        return min(max(int(match.group(1)), 3), 120)
 
     exam_date = goal.get("exam_date")
     if isinstance(exam_date, str):
         exam_date = date.fromisoformat(exam_date)
     if isinstance(exam_date, date):
         days_left = (exam_date - date.today()).days
-        return min(max(days_left, 3), 14)
+        return min(max(days_left, 3), 120)
     return 10
 
 
@@ -53,11 +57,11 @@ def build_rule_based_plan(goal: dict) -> dict:
 
     for index in range(day_count):
         if index == day_count - 1:
-            topic = "考前总复盘与模拟测试"
-            objective = "整合高频考点、错题和薄弱概念，完成一次限时模拟。"
+            topic = "综合复盘与学习总结"
+            objective = "整合重点概念、错题和薄弱环节，完成一次综合检测或知识地图整理。"
         elif index >= max(day_count - 2, 1):
-            topic = "综合刷题与错题复盘"
-            objective = f"用题目暴露知识漏洞，沉淀错题原因和答题模板。{material_note}"
+            topic = "综合练习与错题复盘"
+            objective = f"用练习暴露知识漏洞，沉淀错题原因和解题模板。{material_note}"
         else:
             topic = topic_pool[index % len(topic_pool)]
             objective = f"围绕「{topic}」建立核心概念框架，并完成基础题巩固。{material_note}"

@@ -18,7 +18,9 @@ def create_goal_with_plan(
 
     goal = models.LearningGoal(
         title=payload.title,
-        exam_date=payload.exam_date,
+        goal_type=payload.goal_type,
+        exam_date=payload.resolved_exam_date,
+        duration_days=payload.duration_days,
         daily_minutes=payload.daily_minutes,
         current_level=payload.current_level,
         key_topics=payload.key_topics,
@@ -50,7 +52,9 @@ def create_goal_only(db: Session, payload: GoalCreate, status: str = "planning")
 
     goal = models.LearningGoal(
         title=payload.title,
-        exam_date=payload.exam_date,
+        goal_type=payload.goal_type,
+        exam_date=payload.resolved_exam_date,
+        duration_days=payload.duration_days,
         daily_minutes=payload.daily_minutes,
         current_level=payload.current_level,
         key_topics=payload.key_topics,
@@ -148,7 +152,9 @@ def list_goal_summaries(db: Session) -> list[dict]:
         {
             "id": goal.id,
             "title": goal.title,
+            "goal_type": getattr(goal, "goal_type", "exam"),
             "exam_date": goal.exam_date,
+            "duration_days": goal.duration_days,
             "daily_minutes": goal.daily_minutes,
             "current_level": goal.current_level,
             "key_topics": goal.key_topics,

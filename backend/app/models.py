@@ -39,7 +39,9 @@ class LearningGoal(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
+    goal_type: Mapped[str] = mapped_column(String(20), default="exam", nullable=False)
     exam_date: Mapped[date] = mapped_column(Date, nullable=False)
+    duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     daily_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     current_level: Mapped[str] = mapped_column(String(40), nullable=False)
     key_topics: Mapped[list[str]] = mapped_column(MutableList.as_mutable(json_column()))

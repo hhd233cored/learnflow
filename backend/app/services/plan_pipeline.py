@@ -18,7 +18,9 @@ async def generate_and_store_goal_plan(
 
     payload = GoalCreate(
         title=goal.title,
+        goal_type=getattr(goal, "goal_type", "exam"),
         exam_date=goal.exam_date,
+        duration_days=goal.duration_days,
         daily_minutes=goal.daily_minutes,
         current_level=goal.current_level,
         key_topics=goal.key_topics,

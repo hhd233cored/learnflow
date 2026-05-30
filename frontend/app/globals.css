@@ -34,6 +34,13 @@ body {
   color: hsl(var(--foreground));
 }
 
+@media (min-width: 1024px) {
+  body {
+    /* 桌面端整体缩放到 75%，保留组件之间的相对比例，方便一屏展示更多内容。 */
+    zoom: 0.75;
+  }
+}
+
 button,
 input,
 textarea,

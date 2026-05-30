@@ -134,7 +134,7 @@ export default function Home() {
   const [adjustment, setAdjustment] = useState<Adjustment | null>(null);
   const [materials, setMaterials] = useState<CourseMaterial[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [feedback, setFeedback] = useState("PV 操作题错得比较多，信号量含义有点混。");
+  const [feedback, setFeedback] = useState("");
   const [quizTask, setQuizTask] = useState<StudyTask | null>(null);
   const [planJob, setPlanJob] = useState<Job | null>(null);
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
@@ -143,11 +143,13 @@ export default function Home() {
   const [requestedPanel, setRequestedPanel] = useState<DrawerPanel | null>(null);
 
   const [form, setForm] = useState({
-    title: "10 天复习操作系统",
+    title: "",
+    goalType: "exam" as "exam" | "duration",
     examDate: formatDateInput(defaultExamDate),
+    durationDays: 30,
     dailyMinutes: 120,
     currentLevel: "一般",
-    keyTopics: "进程, 内存管理, 文件系统"
+    keyTopics: ""
   });
 
   const plans = useMemo(() => sortPlans(goal?.plans ?? []), [goal]);
@@ -434,7 +436,9 @@ export default function Home() {
 
     const payload = {
       title: form.title,
-      exam_date: form.examDate,
+      goal_type: form.goalType,
+      exam_date: form.goalType === "exam" ? form.examDate : null,
+      duration_days: form.goalType === "duration" ? Number(form.durationDays) : null,
       daily_minutes: Number(form.dailyMinutes),
       current_level: form.currentLevel,
       key_topics: keyTopics
@@ -561,7 +565,7 @@ export default function Home() {
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-sm font-medium text-primary">
             <Sparkles className="h-4 w-4" aria-hidden="true" />
-            <span>AI 学习执行官</span>
+            <span>LearnFlow</span>
           </div>
           <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">
             从目标到复盘的学习执行工作台
@@ -625,7 +629,10 @@ export default function Home() {
                               {active ? <Badge tone="teal">当前</Badge> : null}
                             </div>
                             <p className="mt-1 text-xs text-muted-foreground">
-                              考试 {item.exam_date} · {item.plan_count} 天计划
+                              {item.goal_type === "duration"
+                                ? `${item.duration_days ?? item.plan_count} 天周期`
+                                : `考试 ${item.exam_date}`}{" "}
+                              · {item.plan_count} 天计划
                             </p>
                             <p className="mt-1 text-xs text-muted-foreground">
                               资料 {item.material_count} 份 · {item.status}
@@ -686,18 +693,39 @@ export default function Home() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
-                  <Label htmlFor="examDate">考试日期</Label>
-                  <Input
-                    id="examDate"
-                    type="date"
-                    value={form.examDate}
-                    onChange={(event) =>
-                      setForm((current) => ({
-                        ...current,
-                        examDate: event.target.value
-                      }))
-                    }
-                  />
+                  {form.goalType === "exam" ? (
+                    <>
+                      <Label htmlFor="examDate">考试日期</Label>
+                      <Input
+                        id="examDate"
+                        type="date"
+                        value={form.examDate}
+                        onChange={(event) =>
+                          setForm((current) => ({
+                            ...current,
+                            examDate: event.target.value
+                          }))
+                        }
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <Label htmlFor="durationDays">学习周期</Label>
+                      <Input
+                        id="durationDays"
+                        type="number"
+                        min={3}
+                        max={120}
+                        value={form.durationDays}
+                        onChange={(event) =>
+                          setForm((current) => ({
+                            ...current,
+                            durationDays: Number(event.target.value)
+                          }))
+                        }
+                      />
+                    </>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="dailyMinutes">每日分钟</Label>
@@ -715,23 +743,53 @@ export default function Home() {
                   />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="currentLevel">当前基础</Label>
-                <select
-                  id="currentLevel"
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  value={form.currentLevel}
-                  onChange={(event) =>
-                    setForm((current) => ({
-                      ...current,
-                      currentLevel: event.target.value
-                    }))
-                  }
-                >
-                  <option>薄弱</option>
-                  <option>一般</option>
-                  <option>较好</option>
-                </select>
+              <div className="grid grid-cols-[minmax(0,1fr)_172px] gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="currentLevel">当前基础</Label>
+                  <select
+                    id="currentLevel"
+                    className="h-10 w-full rounded-md border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={form.currentLevel}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        currentLevel: event.target.value
+                      }))
+                    }
+                  >
+                    <option>薄弱</option>
+                    <option>一般</option>
+                    <option>较好</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label>目标模式</Label>
+                  <div className="grid h-10 grid-cols-2 rounded-md border bg-background p-1">
+                    {[
+                      { label: "考试", value: "exam" as const },
+                      { label: "周期", value: "duration" as const }
+                    ].map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={cn(
+                          "rounded px-2 text-xs font-medium transition-colors",
+                          form.goalType === option.value
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:bg-muted"
+                        )}
+                        onClick={() =>
+                          setForm((current) => ({
+                            ...current,
+                            goalType: option.value
+                          }))
+                        }
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="keyTopics">重点章节</Label>
@@ -844,7 +902,7 @@ export default function Home() {
             <CardContent>
               {goal ? (
                 <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)] xl:items-stretch">
-                  <div className="h-[calc(100vh-330px)] min-h-[450px] space-y-2 overflow-y-auto pr-1">
+                  <div className="h-[calc(100vh-160px)] min-h-[775px] space-y-2 overflow-y-auto pr-1">
                     {plans.map((plan) => {
                       const isSelected = selectedPlan?.id === plan.id;
                       const hasTasks = Boolean(taskCache[plan.id]?.length);
@@ -880,7 +938,7 @@ export default function Home() {
                     })}
                   </div>
 
-                  <div className="flex h-[calc(100vh-330px)] min-h-[450px] flex-col overflow-hidden rounded-md border bg-background p-4">
+                  <div className="flex h-[calc(100vh-160px)] min-h-[775px] flex-col overflow-hidden rounded-md border bg-background p-4">
                     {selectedPlan ? (
                       <div className="flex min-h-0 flex-1 flex-col">
                         <div className="shrink-0 space-y-4 pb-4">

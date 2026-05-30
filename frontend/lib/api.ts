@@ -1,6 +1,8 @@
 export type GoalPayload = {
   title: string;
-  exam_date: string;
+  goal_type: "exam" | "duration";
+  exam_date?: string | null;
+  duration_days?: number | null;
   daily_minutes: number;
   current_level: string;
   key_topics: string[];
@@ -132,7 +134,9 @@ export type KnowledgeSnippetPayload = {
 export type GoalDetail = {
   id: number;
   title: string;
+  goal_type: "exam" | "duration";
   exam_date: string;
+  duration_days?: number | null;
   daily_minutes: number;
   current_level: string;
   key_topics: string[];
@@ -142,7 +146,9 @@ export type GoalDetail = {
 export type GoalSummary = {
   id: number;
   title: string;
+  goal_type: "exam" | "duration";
   exam_date: string;
+  duration_days?: number | null;
   daily_minutes: number;
   current_level: string;
   key_topics: string[];
@@ -189,7 +195,13 @@ export const api = {
   createGoalWithMaterials(payload: GoalPayload, files: File[]) {
     const body = new FormData();
     body.append("title", payload.title);
-    body.append("exam_date", payload.exam_date);
+    body.append("goal_type", payload.goal_type);
+    if (payload.exam_date) {
+      body.append("exam_date", payload.exam_date);
+    }
+    if (payload.duration_days) {
+      body.append("duration_days", String(payload.duration_days));
+    }
     body.append("daily_minutes", String(payload.daily_minutes));
     body.append("current_level", payload.current_level);
     body.append("key_topics", payload.key_topics.join(","));

@@ -1,17 +1,42 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class GoalCreate(BaseModel):
     """创建学习目标的请求体。"""
 
     title: str = Field(min_length=2, max_length=200)
-    exam_date: date
+    # exam: 期末/考研等有明确考试日期；duration: 没有考试日期，只按固定周期学习。
+    goal_type: Literal["exam", "duration"] = "exam"
+    exam_date: date | None = None
+    duration_days: int | None = Field(default=None, ge=3, le=120)
     daily_minutes: int = Field(ge=30, le=600)
     current_level: str = Field(min_length=1, max_length=40)
     key_topics: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_goal_timing(self) -> "GoalCreate":
+        """校验两种目标模式所需的时间字段。"""
+
+        if self.goal_type == "exam" and self.exam_date is None:
+            raise ValueError("考试模式需要提供 exam_date")
+        if self.goal_type == "duration" and self.duration_days is None:
+            raise ValueError("固定周期模式需要提供 duration_days")
+        return self
+
+    @property
+    def resolved_exam_date(self) -> date:
+        """返回可落库的目标结束日期。
+
+        旧表结构和列表页仍然依赖 `exam_date` 字段。对于固定周期学习，
+        这里把它解释为“计划结束日期”，从而兼容既有查询和展示逻辑。
+        """
+
+        if self.exam_date is not None:
+            return self.exam_date
+        return date.today() + timedelta(days=max(self.duration_days or 1, 1) - 1)
 
 
 class JobRead(BaseModel):
@@ -51,7 +76,9 @@ class GoalRead(BaseModel):
 
     id: int
     title: str
+    goal_type: Literal["exam", "duration"] = "exam"
     exam_date: date
+    duration_days: int | None = None
     daily_minutes: int
     current_level: str
     key_topics: list[str]
@@ -63,7 +90,9 @@ class GoalSummaryRead(BaseModel):
 
     id: int
     title: str
+    goal_type: Literal["exam", "duration"] = "exam"
     exam_date: date
+    duration_days: int | None = None
     daily_minutes: int
     current_level: str
     key_topics: list[str]

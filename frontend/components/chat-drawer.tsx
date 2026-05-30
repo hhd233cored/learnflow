@@ -94,7 +94,7 @@ export function ChatDrawer({
     selectedPlan?.id ?? null
   );
   const [knowledgeMaterials, setKnowledgeMaterials] = useState<CourseMaterial[]>([]);
-  const [knowledgeQuery, setKnowledgeQuery] = useState("PV 操作 信号量");
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
   const [selectedMaterialId, setSelectedMaterialId] = useState<number | null>(null);
   const [manualSourceName, setManualSourceName] = useState("手动补充");

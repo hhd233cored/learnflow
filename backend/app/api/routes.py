@@ -118,7 +118,9 @@ def list_goals(db: Session = Depends(get_db)):
 )
 async def create_goal_with_materials(
     title: str = Form(...),
-    exam_date: date = Form(...),
+    goal_type: str = Form("exam"),
+    exam_date: date | None = Form(None),
+    duration_days: int | None = Form(None),
     daily_minutes: int = Form(...),
     current_level: str = Form(...),
     key_topics: str = Form(""),
@@ -134,7 +136,9 @@ async def create_goal_with_materials(
 
     payload = GoalCreate(
         title=title,
+        goal_type=goal_type,
         exam_date=exam_date,
+        duration_days=duration_days,
         daily_minutes=daily_minutes,
         current_level=current_level,
         key_topics=_parse_key_topics(key_topics),
@@ -212,7 +216,9 @@ async def regenerate_goal_plan(goal_id: int, db: Session = Depends(get_db)):
     goal = _get_goal_or_404(db, goal_id)
     payload = GoalCreate(
         title=goal.title,
+        goal_type=getattr(goal, "goal_type", "exam"),
         exam_date=goal.exam_date,
+        duration_days=goal.duration_days,
         daily_minutes=goal.daily_minutes,
         current_level=goal.current_level,
         key_topics=goal.key_topics,
@@ -796,7 +802,9 @@ def _goal_payload(goal: models.LearningGoal) -> dict:
     return {
         "id": goal.id,
         "title": goal.title,
+        "goal_type": getattr(goal, "goal_type", "exam"),
         "exam_date": goal.exam_date,
+        "duration_days": goal.duration_days,
         "daily_minutes": goal.daily_minutes,
         "current_level": goal.current_level,
         "key_topics": goal.key_topics,
@@ -853,12 +861,17 @@ def _chat_context(payload: ChatStreamRequest, db: Session) -> str:
     last_user_message = _last_user_message(payload)
 
     if goal is not None:
+        goal_mode_text = (
+            f"固定周期：{goal.duration_days} 天，计划结束日期：{goal.exam_date}"
+            if getattr(goal, "goal_type", "exam") == "duration"
+            else f"考试日期：{goal.exam_date}"
+        )
         sections.append(
             "\n".join(
                 [
                     "当前学习目标：",
                     f"- 标题：{goal.title}",
-                    f"- 考试日期：{goal.exam_date}",
+                    f"- 目标模式：{goal_mode_text}",
                     f"- 每日可用时间：{goal.daily_minutes} 分钟",
                     f"- 当前基础：{goal.current_level}",
                     f"- 重点章节：{', '.join(goal.key_topics)}",
