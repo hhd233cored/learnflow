@@ -113,7 +113,7 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
       role="dialog"
       aria-modal="true"
     >
-      <div className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border bg-background shadow-xl">
+      <div className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-md border bg-background shadow-xl">
         <div className="flex items-start justify-between gap-4 border-b px-5 py-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">

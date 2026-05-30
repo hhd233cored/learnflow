@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -16,6 +16,7 @@ from app.schemas import (
     GoalRead,
     GoalSummaryRead,
     JobRead,
+    KnowledgeSnippetCreate,
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     LLMHealthRead,
@@ -28,6 +29,9 @@ from app.schemas import (
     TaskQuizRead,
     TaskStatusUpdate,
 )
+from app.core.config import get_settings
+from app.services.chunking import split_text_into_chunks
+from app.services.document_enrichment import enrich_chunks
 from app.services.knowledge_base import ChromaKnowledgeBase, collection_name_for_goal
 from app.services.material_pipeline import build_material_knowledge_base
 from app.services.materials import save_upload_file
@@ -64,9 +68,16 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
     以文本流形式返回。
     """
 
+    tool_result = await _chat_tool_result(payload, db)
     context = _chat_context(payload, db)
+    if tool_result:
+        context = f"{context}\n\n已执行的工具结果：\n{tool_result}".strip()
     messages = [item.model_dump() for item in payload.messages[-12:]]
-    fallback = _fallback_chat_reply(payload, context)
+    fallback = (
+        f"{tool_result}\n\n{_fallback_chat_reply(payload, context)}"
+        if tool_result
+        else _fallback_chat_reply(payload, context)
+    )
 
     stream = DeepSeekClient().stream_chat(
         system_prompt=_chat_system_prompt(context),
@@ -194,6 +205,23 @@ def read_goal(goal_id: int, db: Session = Depends(get_db)):
     return goal
 
 
+@router.post("/goals/{goal_id}/plans/regenerate", response_model=GoalRead)
+async def regenerate_goal_plan(goal_id: int, db: Session = Depends(get_db)):
+    """基于当前目标信息和最新 RAG 知识库重新生成整套学习计划。"""
+
+    goal = _get_goal_or_404(db, goal_id)
+    payload = GoalCreate(
+        title=goal.title,
+        exam_date=goal.exam_date,
+        daily_minutes=goal.daily_minutes,
+        current_level=goal.current_level,
+        key_topics=goal.key_topics,
+    )
+    knowledge_context = _knowledge_context_for_goal(goal.id, payload)
+    daily_plans = await workflow.generate_plan(payload, knowledge_context)
+    return crud.replace_goal_plans(db, goal, daily_plans)
+
+
 @router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_goal(goal_id: int, db: Session = Depends(get_db)):
     """删除某个学习目标及其计划、任务、复盘和知识库 collection。"""
@@ -212,6 +240,8 @@ def delete_goal(goal_id: int, db: Session = Depends(get_db)):
 )
 async def upload_course_material(
     goal_id: int,
+    plan_id: int | None = Form(default=None),
+    day_index: int | None = Form(default=None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -223,6 +253,9 @@ async def upload_course_material(
     """
 
     _get_goal_or_404(db, goal_id)
+    scope_plan_id, scope_day_index = _resolve_plan_scope(
+        db, goal_id, plan_id, day_index
+    )
 
     try:
         storage_path, filename, file_type = save_upload_file(file, goal_id)
@@ -239,7 +272,12 @@ async def upload_course_material(
     )
 
     try:
-        return await build_material_knowledge_base(db, material)
+        return await build_material_knowledge_base(
+            db,
+            material,
+            plan_id=scope_plan_id,
+            day_index=scope_day_index,
+        )
     except Exception as exc:
         return crud.mark_material_failed(db, material, str(exc))
 
@@ -333,13 +371,43 @@ def search_goal_knowledge(
     """检索某个学习目标对应的 Chroma 知识库。"""
 
     _get_goal_or_404(db, goal_id)
-    hits = ChromaKnowledgeBase().query(goal_id, payload.query, payload.top_k)
+    hits = ChromaKnowledgeBase().query(
+        goal_id,
+        payload.query,
+        payload.top_k,
+        material_id=payload.material_id,
+        plan_id=payload.plan_id,
+        day_index=payload.day_index,
+        source_type=payload.source_type,
+    )
     return {
         "goal_id": goal_id,
         "collection": collection_name_for_goal(goal_id),
         "query": payload.query,
         "hits": hits,
     }
+
+
+@router.post(
+    "/goals/{goal_id}/knowledge/snippets",
+    response_model=CourseMaterialRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_knowledge_snippet(
+    goal_id: int,
+    payload: KnowledgeSnippetCreate,
+    db: Session = Depends(get_db),
+):
+    """把用户手动补充的知识片段写入目标级 Chroma 知识库。"""
+
+    return await _create_manual_knowledge_material(
+        db,
+        goal_id=goal_id,
+        content=payload.content,
+        source_name=payload.source_name,
+        plan_id=payload.plan_id,
+        day_index=payload.day_index,
+    )
 
 
 @router.post("/plans/{plan_id}/tasks/generate", response_model=list[StudyTaskRead])
@@ -451,20 +519,7 @@ async def create_review(
     """
 
     plan = _get_plan_or_404(db, plan_id)
-    tasks = crud.list_tasks(db, plan.id)
-
-    if not tasks:
-        generated = await workflow.generate_tasks(_goal_payload(plan.goal), _plan_payload(plan))
-        tasks = crud.replace_tasks(db, plan.id, generated)
-
-    task_payloads = [_task_payload(item) for item in tasks]
-    review = await workflow.generate_review(
-        _goal_payload(plan.goal),
-        _plan_payload(plan),
-        task_payloads,
-        payload.feedback,
-    )
-    return crud.create_review(db, plan, review, payload.feedback)
+    return await _create_review_for_plan(db, plan, payload.feedback)
 
 
 @router.post("/goals/{goal_id}/adjust", response_model=PlanAdjustmentRead)
@@ -482,9 +537,37 @@ async def adjust_tomorrow_plan(
         raise HTTPException(status_code=404, detail="Learning goal not found")
 
     current_plan = crud.get_plan_by_day(db, goal_id, payload.from_day)
-    tomorrow_plan = crud.get_plan_by_day(db, goal_id, payload.from_day + 1)
     if current_plan is None:
         raise HTTPException(status_code=404, detail="Current plan not found")
+    return await _adjust_after_plan(db, goal, current_plan)
+
+
+async def _create_review_for_plan(
+    db: Session, plan: models.StudyPlan, feedback: str
+) -> models.StudyReview:
+    """生成并保存某一天的复盘，供 API 和聊天工具复用。"""
+
+    tasks = crud.list_tasks(db, plan.id)
+    if not tasks:
+        generated = await workflow.generate_tasks(_goal_payload(plan.goal), _plan_payload(plan))
+        tasks = crud.replace_tasks(db, plan.id, generated)
+
+    task_payloads = [_task_payload(item) for item in tasks]
+    review = await workflow.generate_review(
+        _goal_payload(plan.goal),
+        _plan_payload(plan),
+        task_payloads,
+        feedback,
+    )
+    return crud.create_review(db, plan, review, feedback)
+
+
+async def _adjust_after_plan(
+    db: Session, goal: models.LearningGoal, current_plan: models.StudyPlan
+) -> models.PlanAdjustment:
+    """根据当前 Day 的最新复盘调整下一天计划。"""
+
+    tomorrow_plan = crud.get_plan_by_day(db, goal.id, current_plan.day_index + 1)
     if tomorrow_plan is None:
         raise HTTPException(status_code=400, detail="No tomorrow plan to adjust")
 
@@ -500,10 +583,172 @@ async def adjust_tomorrow_plan(
     return crud.apply_adjustment(
         db,
         goal_id=goal.id,
-        from_day=payload.from_day,
+        from_day=current_plan.day_index,
         tomorrow_plan=tomorrow_plan,
         adjustment=adjustment,
     )
+
+
+async def _create_manual_knowledge_material(
+    db: Session,
+    goal_id: int,
+    content: str,
+    source_name: str,
+    plan_id: int | None = None,
+    day_index: int | None = None,
+) -> models.CourseMaterial:
+    """把手动输入的知识片段作为一种 manual 素材写入 Chroma。"""
+
+    _get_goal_or_404(db, goal_id)
+    scope_plan_id, scope_day_index = _resolve_plan_scope(
+        db, goal_id, plan_id, day_index
+    )
+    settings = get_settings()
+    chunks = split_text_into_chunks(
+        content,
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+    )
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No readable text in snippet")
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    material = crud.create_course_material(
+        db,
+        goal_id=goal_id,
+        filename=source_name,
+        file_type="manual",
+        storage_path=f"manual://goal/{goal_id}/{timestamp}",
+        chroma_collection=collection_name_for_goal(goal_id),
+    )
+    try:
+        crud.mark_material_processing(db, material)
+        enriched_chunks = await enrich_chunks(chunks, source_name)
+        chroma_ids = ChromaKnowledgeBase().upsert_chunks(
+            goal_id=goal_id,
+            material_id=material.id,
+            filename=source_name,
+            chunks=chunks,
+            enrichments=enriched_chunks,
+            plan_id=scope_plan_id,
+            day_index=scope_day_index,
+            source_type="manual",
+        )
+        return crud.replace_material_chunks(db, material, chunks, chroma_ids)
+    except Exception as exc:
+        return crud.mark_material_failed(db, material, str(exc))
+
+
+def _resolve_plan_scope(
+    db: Session,
+    goal_id: int,
+    plan_id: int | None = None,
+    day_index: int | None = None,
+) -> tuple[int | None, int | None]:
+    """校验上传/插入时选择的计划范围，并返回写入 Chroma 的 metadata。"""
+
+    if plan_id is not None:
+        plan = crud.get_plan(db, plan_id)
+        if plan is None or plan.goal_id != goal_id:
+            raise HTTPException(status_code=400, detail="Plan does not belong to goal")
+        return plan.id, plan.day_index
+
+    if day_index is not None:
+        plan = crud.get_plan_by_day(db, goal_id, day_index)
+        if plan is None:
+            raise HTTPException(status_code=400, detail="Plan day not found")
+        return plan.id, plan.day_index
+
+    return None, None
+
+
+async def _chat_tool_result(payload: ChatStreamRequest, db: Session) -> str | None:
+    """根据用户自然语言触发轻量工具，并把工具结果放回聊天上下文。"""
+
+    message = _last_user_message(payload)
+    if not message or payload.goal_id is None:
+        return None
+
+    goal = crud.get_goal(db, payload.goal_id)
+    plan = crud.get_plan(db, payload.plan_id) if payload.plan_id else None
+    if goal is None:
+        return None
+
+    try:
+        if _wants_knowledge_insert(message):
+            content = _extract_snippet_content(message)
+            material = await _create_manual_knowledge_material(
+                db,
+                goal_id=goal.id,
+                content=content,
+                source_name="聊天补充",
+                plan_id=plan.id if plan else None,
+            )
+            return (
+                "KnowledgeIngestTool 已执行："
+                f"已写入 {material.chunk_count} 个知识片段到 {material.chroma_collection}。"
+            )
+
+        if plan is not None and _wants_adjustment(message):
+            if crud.latest_review_for_plan(db, plan.id) is None:
+                await _create_review_for_plan(db, plan, message)
+            adjustment = await _adjust_after_plan(db, goal, plan)
+            return (
+                "ReviewTool 与 AdjustPlanTool 已执行："
+                f"Day {adjustment.from_day + 1} 已调整为「{adjustment.adjusted_topic}」。"
+                f"原因：{adjustment.reason}"
+            )
+
+        if plan is not None and _wants_review(message):
+            review = await _create_review_for_plan(db, plan, message)
+            return (
+                "ReviewTool 已执行："
+                f"完成率 {round(review.completion_rate * 100)}%。"
+                f"复盘：{review.summary}"
+            )
+
+        if _wants_knowledge_search(message):
+            hits = ChromaKnowledgeBase().query(goal.id, message, top_k=3)
+            if not hits:
+                return "KnowledgeSearchTool 已执行：没有检索到足够相关的知识片段。"
+            lines = []
+            for index, hit in enumerate(hits, start=1):
+                metadata = hit.get("metadata") or {}
+                source = metadata.get("source") or metadata.get("filename") or "知识片段"
+                lines.append(f"{index}. {source}：{str(hit.get('content') or '')[:220]}")
+            return "KnowledgeSearchTool 已执行：\n" + "\n".join(lines)
+    except HTTPException as exc:
+        return f"工具执行失败：{exc.detail}"
+    except Exception as exc:
+        return f"工具执行失败：{exc}"
+
+    return None
+
+
+def _wants_review(message: str) -> bool:
+    return "复盘" in message and not _wants_adjustment(message)
+
+
+def _wants_adjustment(message: str) -> bool:
+    return "调整" in message and ("计划" in message or "明天" in message or "后续" in message)
+
+
+def _wants_knowledge_search(message: str) -> bool:
+    return any(token in message for token in ["查一下", "检索", "知识库", "资料里"])
+
+
+def _wants_knowledge_insert(message: str) -> bool:
+    return any(token in message for token in ["加入知识库", "写入知识库", "补充到知识库", "记到知识库"])
+
+
+def _extract_snippet_content(message: str) -> str:
+    """尽量从自然语言里抽出要写入知识库的正文。"""
+
+    markers = ["加入知识库：", "写入知识库：", "补充到知识库：", "记到知识库："]
+    for marker in markers:
+        if marker in message:
+            return message.split(marker, 1)[1].strip() or message
+    return message
 
 
 def _get_plan_or_404(db: Session, plan_id: int) -> models.StudyPlan:
@@ -667,6 +912,7 @@ def _chat_system_prompt(context: str) -> str:
             "请使用 Markdown 组织答案；代码、命令和配置用 fenced code block。",
             "数学公式请使用 LaTeX：行内公式用 \\(...\\)，独立公式用 \\[...\\]。",
             "如果提供了当前计划、任务或课程资料上下文，请优先结合这些内容。",
+            "系统已注册轻量工具：KnowledgeSearchTool、KnowledgeIngestTool、ReviewTool、AdjustPlanTool；如果上下文里出现工具结果，请直接解释结果并给下一步建议。",
             "不要编造资料中没有的页码、公式编号或教材原句。",
             "当前上下文如下：",
             context or "暂无学习上下文。",
@@ -762,6 +1008,14 @@ def _knowledge_context_for_plan(plan: models.StudyPlan) -> list[dict]:
     """
 
     try:
+        scoped_hits = ChromaKnowledgeBase().query(
+            plan.goal_id,
+            plan.topic,
+            top_k=3,
+            day_index=plan.day_index,
+        )
+        if scoped_hits:
+            return scoped_hits
         return ChromaKnowledgeBase().query(plan.goal_id, plan.topic, top_k=3)
     except Exception:
         return []

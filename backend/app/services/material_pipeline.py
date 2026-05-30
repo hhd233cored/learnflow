@@ -11,7 +11,10 @@ from app.services.knowledge_base import ChromaKnowledgeBase
 
 
 async def build_material_knowledge_base(
-    db: Session, material: models.CourseMaterial
+    db: Session,
+    material: models.CourseMaterial,
+    plan_id: int | None = None,
+    day_index: int | None = None,
 ) -> models.CourseMaterial:
     """执行课程资料建库管线。
 
@@ -39,5 +42,8 @@ async def build_material_knowledge_base(
         filename=material.filename,
         chunks=chunks,
         enrichments=enriched_chunks,
+        plan_id=plan_id,
+        day_index=day_index,
+        source_type=material.file_type,
     )
     return crud.replace_material_chunks(db, material, chunks, chroma_ids)

@@ -115,6 +115,20 @@ export type KnowledgeSearchHit = {
   distance?: number | null;
 };
 
+export type KnowledgeSearchFilters = {
+  material_id?: number;
+  plan_id?: number;
+  day_index?: number;
+  source_type?: string;
+};
+
+export type KnowledgeSnippetPayload = {
+  content: string;
+  source_name: string;
+  plan_id?: number;
+  day_index?: number;
+};
+
 export type GoalDetail = {
   id: number;
   title: string;
@@ -221,6 +235,12 @@ export const api = {
     });
   },
 
+  regenerateGoalPlan(goalId: number) {
+    return request<GoalDetail>(`/goals/${goalId}/plans/regenerate`, {
+      method: "POST"
+    });
+  },
+
   getTasks(planId: number) {
     return request<StudyTask[]>(`/plans/${planId}/tasks`);
   },
@@ -266,9 +286,15 @@ export const api = {
     });
   },
 
-  uploadMaterial(goalId: number, file: File) {
+  uploadMaterial(goalId: number, file: File, filters: KnowledgeSearchFilters = {}) {
     const body = new FormData();
     body.append("file", file);
+    if (filters.plan_id) {
+      body.append("plan_id", String(filters.plan_id));
+    }
+    if (filters.day_index) {
+      body.append("day_index", String(filters.day_index));
+    }
     return fetch(`${API_BASE_URL}/goals/${goalId}/materials/upload`, {
       method: "POST",
       body
@@ -284,12 +310,24 @@ export const api = {
     return request<CourseMaterial[]>(`/goals/${goalId}/materials`);
   },
 
-  searchKnowledge(goalId: number, query: string, topK = 5) {
+  createKnowledgeSnippet(goalId: number, payload: KnowledgeSnippetPayload) {
+    return request<CourseMaterial>(`/goals/${goalId}/knowledge/snippets`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  searchKnowledge(
+    goalId: number,
+    query: string,
+    topK = 5,
+    filters: KnowledgeSearchFilters = {}
+  ) {
     return request<{ hits: KnowledgeSearchHit[] }>(
       `/goals/${goalId}/knowledge/search`,
       {
         method: "POST",
-        body: JSON.stringify({ query, top_k: topK })
+        body: JSON.stringify({ query, top_k: topK, ...filters })
       }
     );
   },

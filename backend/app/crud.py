@@ -71,7 +71,33 @@ def replace_goal_plans(
     防止重复运行任务后产生两套 Day 1、Day 2。
     """
 
-    db.query(models.StudyPlan).filter(models.StudyPlan.goal_id == goal.id).delete()
+    plan_ids = list(
+        db.scalars(
+            select(models.StudyPlan.id).where(models.StudyPlan.goal_id == goal.id)
+        ).all()
+    )
+    if plan_ids:
+        task_ids = list(
+            db.scalars(
+                select(models.StudyTask.id).where(models.StudyTask.plan_id.in_(plan_ids))
+            ).all()
+        )
+        if task_ids:
+            db.query(models.TaskQuiz).filter(
+                models.TaskQuiz.task_id.in_(task_ids)
+            ).delete(synchronize_session=False)
+        db.query(models.StudyTask).filter(
+            models.StudyTask.plan_id.in_(plan_ids)
+        ).delete(synchronize_session=False)
+        db.query(models.StudyReview).filter(
+            models.StudyReview.plan_id.in_(plan_ids)
+        ).delete(synchronize_session=False)
+        db.query(models.StudyPlan).filter(
+            models.StudyPlan.id.in_(plan_ids)
+        ).delete(synchronize_session=False)
+    db.query(models.PlanAdjustment).filter(
+        models.PlanAdjustment.goal_id == goal.id
+    ).delete(synchronize_session=False)
     for item in daily_plans:
         db.add(
             models.StudyPlan(

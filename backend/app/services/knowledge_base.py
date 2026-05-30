@@ -34,12 +34,14 @@ class ChromaKnowledgeBase:
         filename: str,
         chunks: list[str],
         enrichments: list[dict[str, Any]] | None = None,
+        plan_id: int | None = None,
+        day_index: int | None = None,
+        source_type: str = "material",
     ) -> list[str]:
-        """插入或替换某个上传资料的 chunk。
+        """插入或替换某个素材的 chunk。
 
-        Chroma 保存用于检索的文本和向量。英文资料会写入“原文 + 中文摘要
-        + 中英术语”的增强文本，让中文查询也更容易召回英文教材片段。
-        返回的 ids 会写入 SQL，让关系型数据库能够引用 Chroma 中的文档。
+        RAG 存储仍然采用“一个学习目标一个 collection”的结构，plan/day/material
+        都作为 metadata 写入。这样既能避免重复建库，又能在检索时按素材或 Day 过滤。
         """
 
         collection_name = collection_name_for_goal(goal_id)
@@ -61,6 +63,10 @@ class ChromaKnowledgeBase:
                     "chunk_index": index,
                     "filename": filename,
                     "source": f"{filename}#chunk-{index}",
+                    "source_name": filename,
+                    "source_type": source_type,
+                    "plan_id": plan_id,
+                    "day_index": day_index,
                 },
                 enrichments,
                 index,
@@ -71,7 +77,16 @@ class ChromaKnowledgeBase:
             collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         return ids
 
-    def query(self, goal_id: int, query: str, top_k: int = 5) -> list[dict[str, Any]]:
+    def query(
+        self,
+        goal_id: int,
+        query: str,
+        top_k: int = 5,
+        material_id: int | None = None,
+        plan_id: int | None = None,
+        day_index: int | None = None,
+        source_type: str | None = None,
+    ) -> list[dict[str, Any]]:
         """检索某个目标的 Chroma collection，并规范化返回结果。"""
 
         collection_name = collection_name_for_goal(goal_id)
@@ -80,11 +95,21 @@ class ChromaKnowledgeBase:
             embedding_function=self.embedding_function,
             metadata={"hnsw:space": "cosine"},
         )
-        result = collection.query(
-            query_texts=[query],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
+        query_args: dict[str, Any] = {
+            "query_texts": [query],
+            "n_results": top_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        where_filter = _where_filter(
+            material_id=material_id,
+            plan_id=plan_id,
+            day_index=day_index,
+            source_type=source_type,
         )
+        if where_filter:
+            query_args["where"] = where_filter
+
+        result = collection.query(**query_args)
         documents = result.get("documents", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
         distances = result.get("distances", [[]])[0]
@@ -102,11 +127,7 @@ class ChromaKnowledgeBase:
         return hits
 
     def delete_goal_collection(self, goal_id: int) -> None:
-        """删除某个学习目标对应的 Chroma collection。
-
-        删除学习计划时调用。Chroma collection 不存在或删除失败时不抛出，
-        因为关系型数据库删除才是用户可见的主流程。
-        """
+        """删除某个学习目标对应的 Chroma collection。"""
 
         try:
             self.client.delete_collection(collection_name_for_goal(goal_id))
@@ -129,20 +150,55 @@ def _metadata_for_chunk(
 ) -> dict[str, Any]:
     """把增强信息压平成 Chroma 可接受的 metadata。"""
 
-    if not enrichments or index >= len(enrichments):
-        return base
+    if enrichments and index < len(enrichments):
+        item = enrichments[index]
+        base.update(
+            {
+                "source_lang": str(item.get("source_lang") or "unknown"),
+                "summary_zh": str(item.get("summary_zh") or ""),
+                "key_terms_json": json.dumps(
+                    item.get("key_terms") or [], ensure_ascii=False, default=str
+                ),
+            }
+        )
+    return _compact_metadata(base)
 
-    item = enrichments[index]
-    base.update(
-        {
-            "source_lang": str(item.get("source_lang") or "unknown"),
-            "summary_zh": str(item.get("summary_zh") or ""),
-            "key_terms_json": json.dumps(
-                item.get("key_terms") or [], ensure_ascii=False, default=str
-            ),
-        }
-    )
-    return base
+
+def _compact_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """移除 Chroma 不接受的空值，并只保留标量 metadata。"""
+
+    compacted: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            compacted[key] = value
+    return compacted
+
+
+def _where_filter(
+    material_id: int | None = None,
+    plan_id: int | None = None,
+    day_index: int | None = None,
+    source_type: str | None = None,
+) -> dict[str, Any] | None:
+    """把前端筛选项转换为 Chroma where 查询条件。"""
+
+    conditions: list[dict[str, Any]] = []
+    if material_id is not None:
+        conditions.append({"material_id": material_id})
+    if plan_id is not None:
+        conditions.append({"plan_id": plan_id})
+    if day_index is not None:
+        conditions.append({"day_index": day_index})
+    if source_type:
+        conditions.append({"source_type": source_type})
+
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
 
 
 def _decode_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

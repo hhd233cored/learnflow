@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  ArrowRight,
   BrainCircuit,
   CalendarDays,
   Check,
@@ -11,13 +10,13 @@ import {
   FolderOpen,
   Loader2,
   RefreshCcw,
-  Search,
   Sparkles,
   Target,
   Trash2
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { ChatDrawer } from "@/components/chat-drawer";
+import type { DrawerPanel } from "@/components/chat-drawer";
 import { TaskQuizDialog } from "@/components/task-quiz-dialog";
 import type {
   Adjustment,
@@ -25,7 +24,6 @@ import type {
   GoalDetail,
   GoalSummary,
   Job,
-  KnowledgeSearchHit,
   Review,
   StudyPlan,
   StudyTask
@@ -113,30 +111,6 @@ function getPlanJobLabel(job: Job | null) {
   return "正在生成学习计划";
 }
 
-function metadataString(hit: KnowledgeSearchHit, key: string) {
-  const value = hit.metadata[key];
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function metadataTerms(hit: KnowledgeSearchHit) {
-  const terms = hit.metadata.key_terms;
-  if (!Array.isArray(terms)) {
-    return [];
-  }
-  return terms
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return "";
-      }
-      const record = item as Record<string, unknown>;
-      const source = typeof record.source === "string" ? record.source : "";
-      const zh = typeof record.zh === "string" ? record.zh : "";
-      return zh && source && zh !== source ? `${source} / ${zh}` : source || zh;
-    })
-    .filter(Boolean)
-    .slice(0, 5);
-}
-
 function createLocalPlanJob(progress = 8): Job {
   return {
     id: 0,
@@ -160,14 +134,13 @@ export default function Home() {
   const [adjustment, setAdjustment] = useState<Adjustment | null>(null);
   const [materials, setMaterials] = useState<CourseMaterial[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
-  const [knowledgeQuery, setKnowledgeQuery] = useState("PV 操作 信号量");
   const [feedback, setFeedback] = useState("PV 操作题错得比较多，信号量含义有点混。");
   const [quizTask, setQuizTask] = useState<StudyTask | null>(null);
   const [planJob, setPlanJob] = useState<Job | null>(null);
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
   const [loadingGoals, setLoadingGoals] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [requestedPanel, setRequestedPanel] = useState<DrawerPanel | null>(null);
 
   const [form, setForm] = useState({
     title: "10 天复习操作系统",
@@ -329,7 +302,6 @@ export default function Home() {
       setTaskCache({});
       setReview(null);
       setAdjustment(null);
-      setKnowledgeHits([]);
       setSelectedFiles([]);
       window.localStorage.setItem(LAST_GOAL_ID_KEY, String(goalId));
 
@@ -346,6 +318,22 @@ export default function Home() {
     } finally {
       setLoadingStep(null);
     }
+  }
+
+  async function refreshWorkspace() {
+    if (!goal) {
+      await loadGoalSummaries(false);
+      return;
+    }
+
+    const [detail, nextMaterials, summaries] = await Promise.all([
+      api.getGoal(goal.id),
+      api.listMaterials(goal.id),
+      api.listGoals()
+    ]);
+    setGoal(detail);
+    setMaterials(nextMaterials);
+    setGoalSummaries(summaries);
   }
 
   async function handleDeleteGoal(goalId: number) {
@@ -367,7 +355,6 @@ export default function Home() {
         setReview(null);
         setAdjustment(null);
         setMaterials([]);
-        setKnowledgeHits([]);
       }
 
       const nextSummaries = await api.listGoals();
@@ -377,6 +364,49 @@ export default function Home() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "删除计划失败");
+    } finally {
+      setLoadingStep(null);
+    }
+  }
+
+  async function handleRegeneratePlan() {
+    if (!goal) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "确定基于当前 RAG 知识库重新生成学习计划吗？现有每日计划、任务、小测、复盘和调整记录会被替换。"
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setLoadingStep("regenerate-plan");
+    setError(null);
+    try {
+      const regeneratedGoal = await api.regenerateGoalPlan(goal.id);
+      const nextMaterials = await api.listMaterials(goal.id);
+      const nextSummaries = await api.listGoals();
+      const firstPlan = sortPlans(regeneratedGoal.plans)[0] ?? null;
+
+      setGoal(regeneratedGoal);
+      setMaterials(nextMaterials);
+      setGoalSummaries(nextSummaries);
+      setTaskCache({});
+      setReview(null);
+      setAdjustment(null);
+
+      if (firstPlan) {
+        setSelectedPlanId(firstPlan.id);
+        window.localStorage.setItem(
+          selectedPlanStorageKey(regeneratedGoal.id),
+          String(firstPlan.id)
+        );
+        await ensureTasksForPlan(firstPlan);
+      } else {
+        setSelectedPlanId(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "计划重新生成失败");
     } finally {
       setLoadingStep(null);
     }
@@ -398,7 +428,6 @@ export default function Home() {
     setReview(null);
     setAdjustment(null);
     setMaterials([]);
-    setKnowledgeHits([]);
     setPlanJob(null);
     setError(null);
     setLoadingStep("goal");
@@ -479,18 +508,6 @@ export default function Home() {
     if (uploaded) {
       const nextMaterials = await api.listMaterials(goal.id);
       setMaterials(nextMaterials);
-    }
-  }
-
-  async function handleSearchKnowledge() {
-    if (!goal || !knowledgeQuery.trim()) {
-      return;
-    }
-    const result = await run("knowledge", () =>
-      api.searchKnowledge(goal.id, knowledgeQuery.trim(), 5)
-    );
-    if (result) {
-      setKnowledgeHits(result.hits);
     }
   }
 
@@ -584,7 +601,7 @@ export default function Home() {
                   正在加载历史计划
                 </div>
               ) : goalSummaries.length > 0 ? (
-                <div className="space-y-2">
+                <div className="max-h-[340px] space-y-2 overflow-y-auto pr-1">
                   {goalSummaries.map((item) => {
                     const active = goal?.id === item.id;
                     return (
@@ -794,132 +811,40 @@ export default function Home() {
               ) : null}
             </CardContent>
           </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileText className="h-5 w-5 text-primary" aria-hidden="true" />
-                课程知识库
-              </CardTitle>
-              <CardDescription>
-                上传课程资料后，任务生成会优先参考检索到的知识片段。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="material">课程资料</Label>
-                <Input
-                  id="material"
-                  type="file"
-                  accept=".pdf,.docx,.pptx,.txt,.md"
-                  disabled={!goal || isBusy}
-                  onChange={handleUploadMaterial}
-                />
-              </div>
-              {materials.length > 0 ? (
-                <div className="space-y-2">
-                  {materials.map((material) => (
-                    <div
-                      className="rounded-md border bg-background p-3 text-sm"
-                      key={material.id}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{material.filename}</span>
-                        <Badge
-                          tone={
-                            material.parse_status === "ready"
-                              ? "teal"
-                              : material.parse_status === "failed"
-                                ? "rose"
-                                : "amber"
-                          }
-                        >
-                          {material.parse_status}
-                        </Badge>
-                      </div>
-                      <p className="mt-1 text-muted-foreground">
-                        {material.chunk_count} chunks · {material.chroma_collection}
-                      </p>
-                      {material.error_message ? (
-                        <p className="mt-2 text-rose-700">{material.error_message}</p>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <EmptyState text="创建目标后可以上传课程资料。" />
-              )}
-              <div className="flex gap-2">
-                <Input
-                  value={knowledgeQuery}
-                  onChange={(event) => setKnowledgeQuery(event.target.value)}
-                  disabled={!goal || isBusy}
-                />
-                <Button
-                  variant="outline"
-                  onClick={handleSearchKnowledge}
-                  disabled={!goal || isBusy}
-                  title="检索知识库"
-                >
-                  <Search className="h-4 w-4" aria-hidden="true" />
-                </Button>
-              </div>
-              {knowledgeHits.length > 0 ? (
-                <div className="space-y-2">
-                  {knowledgeHits.map((hit, index) => (
-                    <div className="rounded-md border bg-background p-3" key={index}>
-                      <div className="mb-2 flex flex-wrap items-center gap-2">
-                        {metadataString(hit, "source_lang") ? (
-                          <Badge tone="neutral">
-                            {metadataString(hit, "source_lang")}
-                          </Badge>
-                        ) : null}
-                        {metadataString(hit, "source") ? (
-                          <span className="text-xs text-muted-foreground">
-                            {metadataString(hit, "source")}
-                          </span>
-                        ) : null}
-                      </div>
-                      {metadataString(hit, "summary_zh") ? (
-                        <p className="mb-2 text-sm leading-6">
-                          {metadataString(hit, "summary_zh")}
-                        </p>
-                      ) : null}
-                      <p className="line-clamp-4 text-sm leading-6 text-muted-foreground">
-                        {hit.content}
-                      </p>
-                      {metadataTerms(hit).length > 0 ? (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {metadataTerms(hit).map((term) => (
-                            <Badge tone="teal" key={term}>
-                              {term}
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
         </div>
 
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <CalendarDays className="h-5 w-5 text-primary" aria-hidden="true" />
-                学习计划
-              </CardTitle>
-              <CardDescription>
-                选择任意一天即可查看或自动生成对应任务。
-              </CardDescription>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <CalendarDays className="h-5 w-5 text-primary" aria-hidden="true" />
+                    学习计划
+                  </CardTitle>
+                  <CardDescription>
+                    选择任意一天即可查看或自动生成对应任务。
+                  </CardDescription>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="基于更新后的 RAG 知识库重新生成计划"
+                  disabled={!goal || isBusy}
+                  onClick={handleRegeneratePlan}
+                >
+                  {loadingStep === "regenerate-plan" ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
               {goal ? (
-                <div className="grid gap-5 xl:grid-cols-[300px_1fr]">
-                  <div className="space-y-2">
+                <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)] xl:items-stretch">
+                  <div className="h-[calc(100vh-330px)] min-h-[450px] space-y-2 overflow-y-auto pr-1">
                     {plans.map((plan) => {
                       const isSelected = selectedPlan?.id === plan.id;
                       const hasTasks = Boolean(taskCache[plan.id]?.length);
@@ -955,36 +880,38 @@ export default function Home() {
                     })}
                   </div>
 
-                  <div className="rounded-md border bg-background p-4">
+                  <div className="flex h-[calc(100vh-330px)] min-h-[450px] flex-col overflow-hidden rounded-md border bg-background p-4">
                     {selectedPlan ? (
-                      <div className="space-y-4">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                          <div>
-                            <Badge tone={selectedPlan.adjusted ? "amber" : "teal"}>
-                              Day {selectedPlan.day_index}
-                            </Badge>
-                            <h2 className="mt-3 text-lg font-semibold">
-                              {selectedPlan.topic}
-                            </h2>
-                            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                              {selectedPlan.objective}
-                            </p>
+                      <div className="flex min-h-0 flex-1 flex-col">
+                        <div className="shrink-0 space-y-4 pb-4">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                            <div>
+                              <Badge tone={selectedPlan.adjusted ? "amber" : "teal"}>
+                                Day {selectedPlan.day_index}
+                              </Badge>
+                              <h2 className="mt-3 text-lg font-semibold">
+                                {selectedPlan.topic}
+                              </h2>
+                              <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                                {selectedPlan.objective}
+                              </p>
+                            </div>
+                            <span className="text-sm text-muted-foreground">
+                              {selectedPlan.plan_date}
+                            </span>
                           </div>
-                          <span className="text-sm text-muted-foreground">
-                            {selectedPlan.plan_date}
-                          </span>
-                        </div>
 
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between text-sm">
-                            <span className="text-muted-foreground">任务完成度</span>
-                            <span className="font-medium">{completionRate}%</span>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-muted-foreground">任务完成度</span>
+                              <span className="font-medium">{completionRate}%</span>
+                            </div>
+                            <Progress value={completionRate} />
                           </div>
-                          <Progress value={completionRate} />
                         </div>
 
                         {selectedTaskLoading ? (
-                          <div className="flex min-h-48 items-center justify-center rounded-md border border-dashed">
+                          <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed">
                             <div className="flex items-center gap-2 text-sm text-muted-foreground">
                               <Loader2
                                 className="h-4 w-4 animate-spin"
@@ -994,7 +921,7 @@ export default function Home() {
                             </div>
                           </div>
                         ) : selectedTasks.length > 0 ? (
-                          <div className="space-y-3">
+                          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
                             {selectedTasks.map((task) => (
                               <div
                                 className="rounded-md border bg-card p-4"
@@ -1066,7 +993,9 @@ export default function Home() {
                             ))}
                           </div>
                         ) : (
-                          <EmptyState text="当前日期还没有任务。" />
+                          <div className="min-h-0 flex-1">
+                            <EmptyState text="当前日期还没有任务。" />
+                          </div>
                         )}
                       </div>
                     ) : (
@@ -1083,87 +1012,36 @@ export default function Home() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <RefreshCcw className="h-5 w-5 text-primary" aria-hidden="true" />
-                复盘与调整
+                <FileText className="h-5 w-5 text-primary" aria-hidden="true" />
+                知识库状态
               </CardTitle>
               <CardDescription>
-                当前选中 Day 会作为复盘对象，调整会作用到下一天计划。
+                素材上传、手动插入和 RAG 检索已整合到右侧知识库面板。
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="feedback">学习反馈</Label>
-                <Textarea
-                  id="feedback"
-                  value={feedback}
-                  onChange={(event) => setFeedback(event.target.value)}
-                />
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Button onClick={handleReview} disabled={!selectedPlan || isBusy}>
-                  {loadingStep === "review" ? (
-                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" aria-hidden="true" />
-                  )}
-                  生成 AI 复盘
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={handleAdjust}
-                  disabled={!review || isBusy}
-                >
-                  调整下一天计划
-                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                </Button>
-              </div>
-
-              {review ? (
-                <div className="rounded-md border bg-background p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold">AI 复盘</h3>
-                    <Badge tone="teal">
-                      完成率 {Math.round(review.completion_rate * 100)}%
-                    </Badge>
+            <CardContent>
+              {goal ? (
+                <div className="grid grid-cols-3 gap-2 text-center text-sm">
+                  <div className="rounded-md border bg-background p-3">
+                    <p className="text-lg font-semibold">{materials.length}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">素材</p>
                   </div>
-                  <p className="text-sm leading-6 text-muted-foreground">
-                    {review.summary}
-                  </p>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {review.weak_points.map((item) => (
-                      <Badge tone="rose" key={item}>
-                        {item}
-                      </Badge>
-                    ))}
+                  <div className="rounded-md border bg-background p-3">
+                    <p className="text-lg font-semibold">
+                      {materials.filter((item) => item.parse_status === "ready").length}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">ready</p>
                   </div>
-                  <ul className="mt-4 space-y-2 text-sm text-muted-foreground">
-                    {review.suggestions.map((item) => (
-                      <li key={item}>· {item}</li>
-                    ))}
-                  </ul>
+                  <div className="rounded-md border bg-background p-3">
+                    <p className="text-lg font-semibold">
+                      {materials.reduce((total, item) => total + item.chunk_count, 0)}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">chunks</p>
+                  </div>
                 </div>
-              ) : null}
-
-              {adjustment ? (
-                <div className="rounded-md border bg-amber-50 p-4">
-                  <h3 className="text-sm font-semibold text-amber-900">
-                    下一天计划调整
-                  </h3>
-                  <div className="mt-3 grid gap-3 text-sm md:grid-cols-2">
-                    <div>
-                      <p className="font-medium text-muted-foreground">调整前</p>
-                      <p className="mt-1">{adjustment.original_topic}</p>
-                    </div>
-                    <div>
-                      <p className="font-medium text-muted-foreground">调整后</p>
-                      <p className="mt-1">{adjustment.adjusted_topic}</p>
-                    </div>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-amber-900">
-                    {adjustment.reason}
-                  </p>
-                </div>
-              ) : null}
+              ) : (
+                <EmptyState text="创建或打开学习目标后，可以管理对应知识库。" />
+              )}
             </CardContent>
           </Card>
         </div>
@@ -1173,7 +1051,24 @@ export default function Home() {
         task={quizTask}
         onClose={() => setQuizTask(null)}
       />
-      <ChatDrawer goal={goal} selectedPlan={selectedPlan} />
+      <ChatDrawer
+        adjustment={adjustment}
+        currentMaterials={materials}
+        feedback={feedback}
+        goal={goal}
+        goalSummaries={goalSummaries}
+        isBusy={isBusy}
+        loadingStep={loadingStep}
+        requestedPanel={requestedPanel}
+        review={review}
+        selectedPlan={selectedPlan}
+        selectedTasks={selectedTasks}
+        onAdjustPlan={handleAdjust}
+        onCreateReview={handleReview}
+        onFeedbackChange={setFeedback}
+        onRequestedPanelHandled={() => setRequestedPanel(null)}
+        onWorkspaceChange={refreshWorkspace}
+      />
     </main>
   );
 }

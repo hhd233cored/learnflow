@@ -245,6 +245,19 @@ class KnowledgeSearchRequest(BaseModel):
 
     query: str = Field(min_length=1, max_length=500)
     top_k: int = Field(default=5, ge=1, le=10)
+    material_id: int | None = None
+    plan_id: int | None = None
+    day_index: int | None = Field(default=None, ge=1)
+    source_type: str | None = Field(default=None, max_length=40)
+
+
+class KnowledgeSnippetCreate(BaseModel):
+    """手动写入 RAG 知识库的资料片段。"""
+
+    content: str = Field(min_length=1, max_length=12000)
+    source_name: str = Field(default="手动补充", min_length=1, max_length=200)
+    plan_id: int | None = None
+    day_index: int | None = Field(default=None, ge=1)
 
 
 class KnowledgeSearchHit(BaseModel):
