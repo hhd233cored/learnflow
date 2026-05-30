@@ -20,6 +20,50 @@
   --border: 214 18% 84%;
   --input: 214 18% 84%;
   --ring: 184 68% 28%;
+  --panel-alpha: 1;
+  --app-background-image: none;
+  --background-image-alpha: 1;
+  --background-overlay-alpha: 0.6;
+}
+
+:root[data-theme="dark"] {
+  --background: 222 24% 10%;
+  --foreground: 210 24% 94%;
+  --card: 222 22% 14%;
+  --card-foreground: 210 24% 94%;
+  --primary: 178 70% 42%;
+  --primary-foreground: 180 40% 8%;
+  --secondary: 220 18% 22%;
+  --secondary-foreground: 210 24% 94%;
+  --muted: 220 16% 20%;
+  --muted-foreground: 215 15% 72%;
+  --accent: 190 32% 22%;
+  --accent-foreground: 180 55% 86%;
+  --destructive: 0 70% 50%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 218 14% 28%;
+  --input: 218 14% 28%;
+  --ring: 178 70% 42%;
+}
+
+:root[data-theme="mint"] {
+  --background: 168 34% 96%;
+  --foreground: 185 38% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 185 38% 12%;
+  --primary: 174 72% 25%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 154 58% 90%;
+  --secondary-foreground: 164 42% 18%;
+  --muted: 168 22% 88%;
+  --muted-foreground: 184 18% 36%;
+  --accent: 42 86% 91%;
+  --accent-foreground: 32 58% 24%;
+  --destructive: 0 74% 48%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 170 20% 78%;
+  --input: 170 20% 78%;
+  --ring: 174 72% 25%;
 }
 
 * {
@@ -28,10 +72,41 @@
 
 body {
   min-height: 100vh;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(241, 245, 249, 0.94)),
-    repeating-linear-gradient(90deg, rgba(15, 23, 42, 0.04) 0 1px, transparent 1px 88px);
+  background: hsl(var(--background));
   color: hsl(var(--foreground));
+}
+
+body::before {
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  content: "";
+  background-image: var(--app-background-image);
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  opacity: var(--background-image-alpha);
+}
+
+body::after {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  content: "";
+  background:
+    linear-gradient(
+      180deg,
+      hsl(var(--background) / calc(var(--background-overlay-alpha) * 0.82)),
+      hsl(var(--background) / calc(var(--background-overlay-alpha) * 0.94))
+    ),
+    repeating-linear-gradient(90deg, rgba(15, 23, 42, 0.04) 0 1px, transparent 1px 88px);
+  opacity: var(--background-overlay-alpha);
+  pointer-events: none;
+}
+
+.bg-card {
+  background-color: hsl(var(--card) / var(--panel-alpha));
+  backdrop-filter: blur(10px);
 }
 
 @media (min-width: 1024px) {

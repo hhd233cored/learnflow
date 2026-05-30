@@ -3,12 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
+  ImageIcon,
   Loader2,
   MessageCircle,
   Plus,
   RefreshCcw,
   Search,
   Send,
+  Settings,
+  SlidersHorizontal,
   Upload,
   X
 } from "lucide-react";
@@ -35,7 +38,17 @@ import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-export type DrawerPanel = "chat" | "knowledge" | "review";
+export type DrawerPanel = "chat" | "knowledge" | "review" | "settings";
+
+type AppTheme = "default" | "dark" | "mint";
+
+type AppSettings = {
+  theme: AppTheme;
+  panelOpacity: number;
+  backgroundOpacity: number;
+  backgroundOverlay: number;
+  backgroundImage: string;
+};
 
 type ChatDrawerProps = {
   adjustment: Adjustment | null;
@@ -63,6 +76,15 @@ const initialMessages: ChatMessage[] = [
       "你好，我是你的 AI 学习助手。可以问我知识点、当前任务，也可以让我调用复盘、调整计划或知识库工具。"
   }
 ];
+
+const SETTINGS_STORAGE_KEY = "studyagent:appSettings";
+const defaultAppSettings: AppSettings = {
+  theme: "default",
+  panelOpacity: 100,
+  backgroundOpacity: 100,
+  backgroundOverlay: 60,
+  backgroundImage: ""
+};
 
 export function ChatDrawer({
   adjustment,
@@ -104,6 +126,7 @@ export function ChatDrawer({
   const [uploadingKnowledge, setUploadingKnowledge] = useState(false);
   const [insertingKnowledge, setInsertingKnowledge] = useState(false);
   const [loadingKnowledge, setLoadingKnowledge] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
 
   const open = activePanel !== null;
@@ -142,6 +165,60 @@ export function ChatDrawer({
     setActivePanel(requestedPanel);
     onRequestedPanelHandled?.();
   }, [onRequestedPanelHandled, requestedPanel]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!stored) {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored) as Partial<AppSettings>;
+      setAppSettings({
+        theme: isAppTheme(parsed.theme) ? parsed.theme : defaultAppSettings.theme,
+        panelOpacity:
+          typeof parsed.panelOpacity === "number"
+            ? clampPanelOpacity(parsed.panelOpacity)
+            : defaultAppSettings.panelOpacity,
+        backgroundOpacity:
+          typeof parsed.backgroundOpacity === "number"
+            ? clampOpacity(parsed.backgroundOpacity)
+            : defaultAppSettings.backgroundOpacity,
+        backgroundOverlay:
+          typeof parsed.backgroundOverlay === "number"
+            ? clampOpacity(parsed.backgroundOverlay)
+            : defaultAppSettings.backgroundOverlay,
+        backgroundImage:
+          typeof parsed.backgroundImage === "string" ? parsed.backgroundImage : ""
+      });
+    } catch {
+      window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (appSettings.theme === "default") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.dataset.theme = appSettings.theme;
+    }
+    root.style.setProperty("--panel-alpha", String(appSettings.panelOpacity / 100));
+    root.style.setProperty(
+      "--background-image-alpha",
+      String(appSettings.backgroundOpacity / 100)
+    );
+    root.style.setProperty(
+      "--background-overlay-alpha",
+      String(appSettings.backgroundOverlay / 100)
+    );
+    root.style.setProperty(
+      "--app-background-image",
+      appSettings.backgroundImage
+        ? `url("${appSettings.backgroundImage.replaceAll('"', "%22")}")`
+        : "none"
+    );
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
+  }, [appSettings]);
 
   useEffect(() => {
     if (goal) {
@@ -226,6 +303,42 @@ export function ChatDrawer({
 
   function openPanel(panel: DrawerPanel) {
     setActivePanel((current) => (current === panel ? null : panel));
+  }
+
+  function updateAppSettings(patch: Partial<AppSettings>) {
+    setAppSettings((current) => ({
+      ...current,
+      ...patch,
+      panelOpacity:
+        typeof patch.panelOpacity === "number"
+          ? clampPanelOpacity(patch.panelOpacity)
+          : current.panelOpacity,
+      backgroundOpacity:
+        typeof patch.backgroundOpacity === "number"
+          ? clampOpacity(patch.backgroundOpacity)
+          : current.backgroundOpacity,
+      backgroundOverlay:
+        typeof patch.backgroundOverlay === "number"
+          ? clampOpacity(patch.backgroundOverlay)
+          : current.backgroundOverlay
+    }));
+  }
+
+  function resetAppSettings() {
+    setAppSettings(defaultAppSettings);
+  }
+
+  function handleBackgroundFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      updateAppSettings({ backgroundImage: String(reader.result || "") });
+    };
+    reader.readAsDataURL(file);
+    event.target.value = "";
   }
 
   function handleKnowledgeGoalChange(goalId: number | null) {
@@ -422,6 +535,15 @@ export function ChatDrawer({
         >
           <RefreshCcw className="h-5 w-5" aria-hidden="true" />
         </ActivityButton>
+        <div className="mt-auto">
+          <ActivityButton
+            active={activePanel === "settings"}
+            label="界面设置"
+            onClick={() => openPanel("settings")}
+          >
+            <Settings className="h-5 w-5" aria-hidden="true" />
+          </ActivityButton>
+        </div>
       </aside>
 
       <div className="fixed bottom-5 right-5 z-40 flex gap-2 md:hidden">
@@ -436,6 +558,10 @@ export function ChatDrawer({
         <Button onClick={() => openPanel("review")} title="复盘调整">
           <RefreshCcw className="h-4 w-4" aria-hidden="true" />
           复盘
+        </Button>
+        <Button onClick={() => openPanel("settings")} title="界面设置">
+          <Settings className="h-4 w-4" aria-hidden="true" />
+          设置
         </Button>
       </div>
 
@@ -488,6 +614,13 @@ export function ChatDrawer({
             searching={searchingKnowledge}
             selectedMaterialId={selectedMaterialId}
             uploading={uploadingKnowledge}
+          />
+        ) : activePanel === "settings" ? (
+          <SettingsPanel
+            settings={appSettings}
+            onBackgroundFile={handleBackgroundFile}
+            onReset={resetAppSettings}
+            onSettingsChange={updateAppSettings}
           />
         ) : activePanel === "review" ? (
           <ReviewPanel
@@ -550,6 +683,155 @@ function ActivityButton({
     >
       {children}
     </button>
+  );
+}
+
+function SettingsPanel({
+  settings,
+  onBackgroundFile,
+  onReset,
+  onSettingsChange
+}: {
+  settings: AppSettings;
+  onBackgroundFile: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onReset: () => void;
+  onSettingsChange: (patch: Partial<AppSettings>) => void;
+}) {
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div className="space-y-4">
+        <div className="rounded-md border bg-background p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <SlidersHorizontal className="h-4 w-4 text-primary" aria-hidden="true" />
+            <h3 className="text-sm font-semibold">主题</h3>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { label: "默认", value: "default" as const },
+              { label: "深色", value: "dark" as const },
+              { label: "青绿", value: "mint" as const }
+            ].map((item) => (
+              <button
+                className={cn(
+                  "h-10 rounded-md border text-sm transition-colors hover:bg-muted",
+                  settings.theme === item.value && "border-primary bg-teal-50 text-primary"
+                )}
+                key={item.value}
+                type="button"
+                onClick={() => onSettingsChange({ theme: item.value })}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-md border bg-background p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal className="h-4 w-4 text-primary" aria-hidden="true" />
+              <h3 className="text-sm font-semibold">Panel 透明度</h3>
+            </div>
+            <span className="text-sm font-medium">{settings.panelOpacity}%</span>
+          </div>
+          <input
+            aria-label="Panel 透明度"
+            className="w-full accent-primary"
+            max={100}
+            min={0}
+            step={5}
+            type="range"
+            value={settings.panelOpacity}
+            onChange={(event) =>
+              onSettingsChange({ panelOpacity: Number(event.target.value) })
+            }
+          />
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
+            透明度会作用于主页面卡片、任务卡片和右侧面板。
+          </p>
+        </div>
+
+        <div className="rounded-md border bg-background p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <ImageIcon className="h-4 w-4 text-primary" aria-hidden="true" />
+            <h3 className="text-sm font-semibold">背景图片</h3>
+          </div>
+          <div className="space-y-3">
+            <Input
+              value={settings.backgroundImage}
+              onChange={(event) =>
+                onSettingsChange({ backgroundImage: event.target.value.trim() })
+              }
+              placeholder="输入图片 URL，或上传本地图片"
+            />
+            <Input
+              accept="image/*"
+              type="file"
+              onChange={onBackgroundFile}
+            />
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">背景图透明度</span>
+                <span className="font-medium">{settings.backgroundOpacity}%</span>
+              </div>
+              <input
+                aria-label="背景图透明度"
+                className="w-full accent-primary"
+                max={100}
+                min={0}
+                step={5}
+                type="range"
+                value={settings.backgroundOpacity}
+                onChange={(event) =>
+                  onSettingsChange({ backgroundOpacity: Number(event.target.value) })
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">背景遮罩强度</span>
+                <span className="font-medium">{settings.backgroundOverlay}%</span>
+              </div>
+              <input
+                aria-label="背景遮罩强度"
+                className="w-full accent-primary"
+                max={100}
+                min={0}
+                step={5}
+                type="range"
+                value={settings.backgroundOverlay}
+                onChange={(event) =>
+                  onSettingsChange({ backgroundOverlay: Number(event.target.value) })
+                }
+              />
+              <p className="text-xs leading-5 text-muted-foreground">
+                调低后背景更清晰；调高后内容区域更柔和、更容易阅读。
+              </p>
+            </div>
+            {settings.backgroundImage ? (
+              <div
+                className="h-28 rounded-md border bg-cover bg-center"
+                style={{
+                  backgroundImage: `linear-gradient(rgba(255,255,255,${
+                    1 - settings.backgroundOpacity / 100
+                  }), rgba(255,255,255,${
+                    1 - settings.backgroundOpacity / 100
+                  })), url("${settings.backgroundImage}")`
+                }}
+              />
+            ) : (
+              <div className="flex h-28 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+                暂未设置背景图片
+              </div>
+            )}
+          </div>
+        </div>
+
+        <Button variant="outline" className="w-full" onClick={onReset}>
+          恢复默认设置
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1018,12 +1300,27 @@ function knowledgeFilters(plan: StudyPlan | null, materialId: number | null) {
   };
 }
 
+function isAppTheme(value: unknown): value is AppTheme {
+  return value === "default" || value === "dark" || value === "mint";
+}
+
+function clampPanelOpacity(value: number) {
+  return clampOpacity(value);
+}
+
+function clampOpacity(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
 function panelTitle(panel: DrawerPanel | null) {
   if (panel === "knowledge") {
     return "课程知识库";
   }
   if (panel === "review") {
     return "复盘与调整";
+  }
+  if (panel === "settings") {
+    return "界面设置";
   }
   return "AI 学习助手";
 }
@@ -1036,6 +1333,9 @@ function panelDescription(panel: DrawerPanel | null, selectedPlan: StudyPlan | n
     return selectedPlan
       ? `当前对象：Day ${selectedPlan.day_index}`
       : "选择某一天后生成复盘";
+  }
+  if (panel === "settings") {
+    return "调整主题、透明度和背景图片。";
   }
   return selectedPlan
     ? `当前上下文：Day ${selectedPlan.day_index}`
