@@ -26,6 +26,7 @@ import type {
   GoalDetail,
   GoalSummary,
   KnowledgeSearchHit,
+  ReadingContext,
   Review,
   StudyPlan,
   StudyTask
@@ -41,6 +42,7 @@ import { cn } from "@/lib/utils";
 export type DrawerPanel = "chat" | "knowledge" | "review" | "settings";
 
 type AppTheme = "default" | "dark" | "mint";
+type BackgroundImageSource = "none" | "url" | "local";
 
 type AppSettings = {
   theme: AppTheme;
@@ -48,6 +50,7 @@ type AppSettings = {
   backgroundOpacity: number;
   backgroundOverlay: number;
   backgroundImage: string;
+  backgroundImageSource: BackgroundImageSource;
 };
 
 type ChatDrawerProps = {
@@ -59,13 +62,14 @@ type ChatDrawerProps = {
   isBusy: boolean;
   loadingStep: string | null;
   requestedPanel?: DrawerPanel | null;
+  readingContext?: ReadingContext | null;
   review: Review | null;
   selectedPlan: StudyPlan | null;
   selectedTasks: StudyTask[];
   onAdjustPlan: () => Promise<void>;
   onCreateReview: () => Promise<void>;
   onFeedbackChange: (value: string) => void;
-  onRequestedPanelHandled?: () => void;
+  onRequestedPanelHandled?: () => void;Agent
   onWorkspaceChange?: () => Promise<void>;
 };
 
@@ -73,17 +77,21 @@ const initialMessages: ChatMessage[] = [
   {
     role: "assistant",
     content:
-      "你好，我是你的 AI 学习助手。可以问我知识点、当前任务，也可以让我调用复盘、调整计划或知识库工具。"
+      "Ciallo～(∠・ω< )⌒★，我是 learnflow Agent。可以问我知识点、当前任务，也可以让我调用复盘、调整计划或知识库工具。"
   }
 ];
 
 const SETTINGS_STORAGE_KEY = "studyagent:appSettings";
+const BACKGROUND_IMAGE_DB_NAME = "studyagent-assets";
+const BACKGROUND_IMAGE_STORE_NAME = "settings";
+const BACKGROUND_IMAGE_KEY = "background-image";
 const defaultAppSettings: AppSettings = {
   theme: "default",
   panelOpacity: 100,
   backgroundOpacity: 100,
   backgroundOverlay: 60,
-  backgroundImage: ""
+  backgroundImage: "",
+  backgroundImageSource: "none"
 };
 
 export function ChatDrawer({
@@ -95,6 +103,7 @@ export function ChatDrawer({
   isBusy,
   loadingStep,
   requestedPanel,
+  readingContext,
   review,
   selectedPlan,
   selectedTasks,
@@ -127,6 +136,8 @@ export function ChatDrawer({
   const [insertingKnowledge, setInsertingKnowledge] = useState(false);
   const [loadingKnowledge, setLoadingKnowledge] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
 
   const open = activePanel !== null;
@@ -167,32 +178,72 @@ export function ChatDrawer({
   }, [onRequestedPanelHandled, requestedPanel]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!stored) {
-      return;
+    let cancelled = false;
+
+    async function loadSettings() {
+      const stored = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (!stored) {
+        setSettingsLoaded(true);
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(stored) as Partial<AppSettings>;
+        const storedBackground =
+          typeof parsed.backgroundImage === "string" ? parsed.backgroundImage : "";
+        const storedSource = isBackgroundImageSource(parsed.backgroundImageSource)
+          ? parsed.backgroundImageSource
+          : deriveBackgroundImageSource(storedBackground);
+
+        const nextSettings: AppSettings = {
+          theme: isAppTheme(parsed.theme) ? parsed.theme : defaultAppSettings.theme,
+          panelOpacity:
+            typeof parsed.panelOpacity === "number"
+              ? clampPanelOpacity(parsed.panelOpacity)
+              : defaultAppSettings.panelOpacity,
+          backgroundOpacity:
+            typeof parsed.backgroundOpacity === "number"
+              ? clampOpacity(parsed.backgroundOpacity)
+              : defaultAppSettings.backgroundOpacity,
+          backgroundOverlay:
+            typeof parsed.backgroundOverlay === "number"
+              ? clampOpacity(parsed.backgroundOverlay)
+              : defaultAppSettings.backgroundOverlay,
+          backgroundImage: storedSource === "url" ? storedBackground : "",
+          backgroundImageSource: storedSource
+        };
+
+        // 兼容旧版本：如果曾经把 data URL 直接写进 localStorage，这里会迁移到 IndexedDB。
+        if (storedBackground.startsWith("data:")) {
+          await saveBackgroundImageToDb(storedBackground);
+          nextSettings.backgroundImage = storedBackground;
+          nextSettings.backgroundImageSource = "local";
+        } else if (storedSource === "local") {
+          nextSettings.backgroundImage = (await loadBackgroundImageFromDb()) ?? "";
+          if (!nextSettings.backgroundImage) {
+            nextSettings.backgroundImageSource = "none";
+          }
+        }
+
+        if (!cancelled) {
+          setAppSettings(nextSettings);
+        }
+      } catch (error) {
+        window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+        if (!cancelled) {
+          setSettingsError(`读取本地设置失败，已恢复默认值：${errorMessage(error)}`);
+        }
+      } finally {
+        if (!cancelled) {
+          setSettingsLoaded(true);
+        }
+      }
     }
-    try {
-      const parsed = JSON.parse(stored) as Partial<AppSettings>;
-      setAppSettings({
-        theme: isAppTheme(parsed.theme) ? parsed.theme : defaultAppSettings.theme,
-        panelOpacity:
-          typeof parsed.panelOpacity === "number"
-            ? clampPanelOpacity(parsed.panelOpacity)
-            : defaultAppSettings.panelOpacity,
-        backgroundOpacity:
-          typeof parsed.backgroundOpacity === "number"
-            ? clampOpacity(parsed.backgroundOpacity)
-            : defaultAppSettings.backgroundOpacity,
-        backgroundOverlay:
-          typeof parsed.backgroundOverlay === "number"
-            ? clampOpacity(parsed.backgroundOverlay)
-            : defaultAppSettings.backgroundOverlay,
-        backgroundImage:
-          typeof parsed.backgroundImage === "string" ? parsed.backgroundImage : ""
-      });
-    } catch {
-      window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
-    }
+
+    void loadSettings();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -213,12 +264,20 @@ export function ChatDrawer({
     );
     root.style.setProperty(
       "--app-background-image",
-      appSettings.backgroundImage
-        ? `url("${appSettings.backgroundImage.replaceAll('"', "%22")}")`
-        : "none"
+      appSettings.backgroundImage ? cssBackgroundUrl(appSettings.backgroundImage) : "none"
     );
-    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(appSettings));
-  }, [appSettings]);
+    if (!settingsLoaded) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        SETTINGS_STORAGE_KEY,
+        JSON.stringify(settingsForLocalStorage(appSettings))
+      );
+    } catch (error) {
+      setSettingsError(`保存设置失败：${errorMessage(error)}`);
+    }
+  }, [appSettings, settingsLoaded]);
 
   useEffect(() => {
     if (goal) {
@@ -309,6 +368,11 @@ export function ChatDrawer({
     setAppSettings((current) => ({
       ...current,
       ...patch,
+      backgroundImageSource:
+        patch.backgroundImageSource ??
+        (typeof patch.backgroundImage === "string"
+          ? deriveBackgroundImageSource(patch.backgroundImage)
+          : current.backgroundImageSource),
       panelOpacity:
         typeof patch.panelOpacity === "number"
           ? clampPanelOpacity(patch.panelOpacity)
@@ -324,21 +388,34 @@ export function ChatDrawer({
     }));
   }
 
-  function resetAppSettings() {
+  async function resetAppSettings() {
+    await deleteBackgroundImageFromDb();
+    setSettingsError(null);
     setAppSettings(defaultAppSettings);
   }
 
-  function handleBackgroundFile(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handleBackgroundFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) {
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateAppSettings({ backgroundImage: String(reader.result || "") });
-    };
-    reader.readAsDataURL(file);
-    event.target.value = "";
+    if (!file.type.startsWith("image/")) {
+      setSettingsError("请选择 JPG、PNG、WebP 等图片文件作为背景。");
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      await saveBackgroundImageToDb(dataUrl);
+      setSettingsError(null);
+      updateAppSettings({
+        backgroundImage: dataUrl,
+        backgroundImageSource: "local"
+      });
+    } catch (error) {
+      setSettingsError(`背景图保存失败：${errorMessage(error)}`);
+    }
   }
 
   function handleKnowledgeGoalChange(goalId: number | null) {
@@ -384,7 +461,8 @@ export function ChatDrawer({
           .filter((message) => message.content.trim())
           .slice(-12),
         goal_id: goal?.id,
-        plan_id: selectedPlan?.id
+        plan_id: selectedPlan?.id,
+        reading_context: readingContext ?? null
       });
       const decoder = new TextDecoder("utf-8");
 
@@ -617,6 +695,7 @@ export function ChatDrawer({
           />
         ) : activePanel === "settings" ? (
           <SettingsPanel
+            error={settingsError}
             settings={appSettings}
             onBackgroundFile={handleBackgroundFile}
             onReset={resetAppSettings}
@@ -687,11 +766,13 @@ function ActivityButton({
 }
 
 function SettingsPanel({
+  error,
   settings,
   onBackgroundFile,
   onReset,
   onSettingsChange
 }: {
+  error: string | null;
   settings: AppSettings;
   onBackgroundFile: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onReset: () => void;
@@ -757,10 +838,18 @@ function SettingsPanel({
             <h3 className="text-sm font-semibold">背景图片</h3>
           </div>
           <div className="space-y-3">
+            {error ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
+                {error}
+              </div>
+            ) : null}
             <Input
-              value={settings.backgroundImage}
+              value={settings.backgroundImageSource === "url" ? settings.backgroundImage : ""}
               onChange={(event) =>
-                onSettingsChange({ backgroundImage: event.target.value.trim() })
+                onSettingsChange({
+                  backgroundImage: event.target.value.trim(),
+                  backgroundImageSource: event.target.value.trim() ? "url" : "none"
+                })
               }
               placeholder="输入图片 URL，或上传本地图片"
             />
@@ -816,7 +905,7 @@ function SettingsPanel({
                     1 - settings.backgroundOpacity / 100
                   }), rgba(255,255,255,${
                     1 - settings.backgroundOpacity / 100
-                  })), url("${settings.backgroundImage}")`
+                  })), ${cssBackgroundUrl(settings.backgroundImage)}`
                 }}
               />
             ) : (
@@ -1304,6 +1393,10 @@ function isAppTheme(value: unknown): value is AppTheme {
   return value === "default" || value === "dark" || value === "mint";
 }
 
+function isBackgroundImageSource(value: unknown): value is BackgroundImageSource {
+  return value === "none" || value === "url" || value === "local";
+}
+
 function clampPanelOpacity(value: number) {
   return clampOpacity(value);
 }
@@ -1426,6 +1519,110 @@ function metadataTerms(hit: KnowledgeSearchHit) {
     })
     .filter(Boolean)
     .slice(0, 5);
+}
+
+function settingsForLocalStorage(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    // 本地图片可能是很长的 data URL，直接写 localStorage 容易触发浏览器配额限制。
+    // 真正的图片内容放在 IndexedDB，这里只保留“使用本地图片”的小标记。
+    backgroundImage: settings.backgroundImageSource === "local" ? "" : settings.backgroundImage
+  };
+}
+
+function cssBackgroundUrl(value: string) {
+  return `url("${value.replaceAll('"', "%22")}")`;
+}
+
+function deriveBackgroundImageSource(value: string): BackgroundImageSource {
+  if (!value) {
+    return "none";
+  }
+  return value.startsWith("data:") ? "local" : "url";
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("文件读取失败"));
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.readAsDataURL(file);
+  });
+}
+
+function openBackgroundImageDb() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("当前浏览器环境不支持 IndexedDB"));
+      return;
+    }
+
+    const request = indexedDB.open(BACKGROUND_IMAGE_DB_NAME, 1);
+    request.onerror = () => reject(request.error ?? new Error("打开 IndexedDB 失败"));
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(BACKGROUND_IMAGE_STORE_NAME)) {
+        database.createObjectStore(BACKGROUND_IMAGE_STORE_NAME);
+      }
+    };
+  });
+}
+
+async function saveBackgroundImageToDb(dataUrl: string) {
+  const database = await openBackgroundImageDb();
+  try {
+    await runBackgroundImageTransaction(database, "readwrite", (store) => {
+      store.put(dataUrl, BACKGROUND_IMAGE_KEY);
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function loadBackgroundImageFromDb() {
+  const database = await openBackgroundImageDb();
+  try {
+    return await new Promise<string | null>((resolve, reject) => {
+      const transaction = database.transaction(BACKGROUND_IMAGE_STORE_NAME, "readonly");
+      const store = transaction.objectStore(BACKGROUND_IMAGE_STORE_NAME);
+      const request = store.get(BACKGROUND_IMAGE_KEY);
+      request.onerror = () => reject(request.error ?? new Error("读取背景图失败"));
+      request.onsuccess = () => {
+        resolve(typeof request.result === "string" ? request.result : null);
+      };
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function deleteBackgroundImageFromDb() {
+  const database = await openBackgroundImageDb();
+  try {
+    await runBackgroundImageTransaction(database, "readwrite", (store) => {
+      store.delete(BACKGROUND_IMAGE_KEY);
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function runBackgroundImageTransaction(
+  database: IDBDatabase,
+  mode: IDBTransactionMode,
+  action: (store: IDBObjectStore) => void
+) {
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(BACKGROUND_IMAGE_STORE_NAME, mode);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("背景图存储失败"));
+    action(transaction.objectStore(BACKGROUND_IMAGE_STORE_NAME));
+  });
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function MarkdownMessage({ content }: { content: string }) {

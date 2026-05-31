@@ -5,25 +5,37 @@ import {
   BrainCircuit,
   CalendarDays,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clock3,
   FileText,
   FolderOpen,
+  Languages,
   Loader2,
   RefreshCcw,
   Sparkles,
   Target,
-  Trash2
+  Trash2,
+  ZoomIn,
+  ZoomOut
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { ChatDrawer } from "@/components/chat-drawer";
 import type { DrawerPanel } from "@/components/chat-drawer";
 import { TaskQuizDialog } from "@/components/task-quiz-dialog";
+import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkMath from "remark-math";
 import type {
   Adjustment,
   CourseMaterial,
   GoalDetail,
   GoalSummary,
   Job,
+  PdfMeta,
+  PdfPageText,
+  PdfPageTranslation,
+  ReadingContext,
   Review,
   StudyPlan,
   StudyTask
@@ -141,6 +153,15 @@ export default function Home() {
   const [loadingGoals, setLoadingGoals] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [requestedPanel, setRequestedPanel] = useState<DrawerPanel | null>(null);
+  const [activeView, setActiveView] = useState<"plan" | "reader">("plan");
+  const [readerMaterialId, setReaderMaterialId] = useState<number | null>(null);
+  const [pdfMeta, setPdfMeta] = useState<PdfMeta | null>(null);
+  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfZoom, setPdfZoom] = useState(100);
+  const [pdfText, setPdfText] = useState<PdfPageText | null>(null);
+  const [pdfTranslation, setPdfTranslation] = useState<PdfPageTranslation | null>(null);
+  const [readerLoading, setReaderLoading] = useState<string | null>(null);
+  const [readerError, setReaderError] = useState<string | null>(null);
 
   const [form, setForm] = useState({
     title: "",
@@ -153,6 +174,14 @@ export default function Home() {
   });
 
   const plans = useMemo(() => sortPlans(goal?.plans ?? []), [goal]);
+  const pdfMaterials = useMemo(
+    () => materials.filter((item) => item.file_type.toLowerCase() === "pdf"),
+    [materials]
+  );
+  const readingContext: ReadingContext | null =
+    activeView === "reader" && readerMaterialId
+      ? { material_id: readerMaterialId, page_index: pdfPage }
+      : null;
   const selectedPlan = useMemo(() => {
     if (plans.length === 0) {
       return null;
@@ -191,6 +220,88 @@ export default function Home() {
     // 只在页面首次加载时恢复历史计划。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (activeView !== "reader") {
+      return;
+    }
+    if (readerMaterialId && !pdfMaterials.some((item) => item.id === readerMaterialId)) {
+      setReaderMaterialId(pdfMaterials[0]?.id ?? null);
+      setPdfPage(1);
+      return;
+    }
+    if (!readerMaterialId && pdfMaterials.length > 0) {
+      setReaderMaterialId(pdfMaterials[0].id);
+    }
+  }, [activeView, pdfMaterials, readerMaterialId]);
+
+  useEffect(() => {
+    if (!readerMaterialId) {
+      setPdfMeta(null);
+      setPdfText(null);
+      setPdfTranslation(null);
+      return;
+    }
+
+    let cancelled = false;
+    setReaderLoading("meta");
+    setReaderError(null);
+    api
+      .getPdfMeta(readerMaterialId)
+      .then((meta) => {
+        if (cancelled) {
+          return;
+        }
+        setPdfMeta(meta);
+        setPdfPage((current) => Math.min(Math.max(current, 1), meta.page_count || 1));
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setReaderError(err instanceof Error ? err.message : "PDF 元信息加载失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setReaderLoading((current) => (current === "meta" ? null : current));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [readerMaterialId]);
+
+  useEffect(() => {
+    if (!readerMaterialId || !pdfMeta) {
+      return;
+    }
+
+    let cancelled = false;
+    setReaderLoading("text");
+    setReaderError(null);
+    setPdfTranslation(null);
+    api
+      .getPdfPageText(readerMaterialId, pdfPage)
+      .then((pageText) => {
+        if (!cancelled) {
+          setPdfText(pageText);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setReaderError(err instanceof Error ? err.message : "PDF 文本加载失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setReaderLoading((current) => (current === "text" ? null : current));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfMeta, pdfPage, readerMaterialId]);
 
   async function run<T>(
     step: string,
@@ -559,6 +670,60 @@ export default function Home() {
     }
   }
 
+  function handleReaderMaterialChange(materialId: number) {
+    if (materialId === readerMaterialId) {
+      return;
+    }
+    setReaderMaterialId(materialId);
+    setPdfPage(1);
+    setPdfMeta(null);
+    setPdfText(null);
+    setPdfTranslation(null);
+    setReaderError(null);
+  }
+
+  async function handleTranslatePdfPage() {
+    if (!readerMaterialId || !pdfText?.readable) {
+      return;
+    }
+    setReaderLoading("translate");
+    setReaderError(null);
+    try {
+      const translated = await api.translatePdfPage(readerMaterialId, pdfPage);
+      setPdfTranslation(translated);
+    } catch (err) {
+      setReaderError(err instanceof Error ? err.message : "当前页翻译失败");
+    } finally {
+      setReaderLoading((current) => (current === "translate" ? null : current));
+    }
+  }
+
+  async function handleReaderPdfUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    if (!goal || !event.target.files?.[0]) {
+      event.target.value = "";
+      return;
+    }
+    const file = event.target.files[0];
+    setReaderLoading("upload");
+    setReaderError(null);
+    try {
+      const material = await api.uploadReaderPdf(goal.id, file);
+      const nextMaterials = await api.listMaterials(goal.id);
+      setMaterials(nextMaterials);
+      setReaderMaterialId(material.id);
+      setPdfPage(1);
+      setPdfMeta(null);
+      setPdfText(null);
+      setPdfTranslation(null);
+      await loadGoalSummaries(false);
+    } catch (err) {
+      setReaderError(err instanceof Error ? err.message : "PDF 上传失败");
+    } finally {
+      event.target.value = "";
+      setReaderLoading((current) => (current === "upload" ? null : current));
+    }
+  }
+
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-4 py-6 md:px-8">
       <header className="flex flex-col gap-4 border-b pb-5 md:flex-row md:items-end md:justify-between">
@@ -571,12 +736,34 @@ export default function Home() {
             从目标到复盘的学习执行工作台
           </h1>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Badge tone="teal">LangGraph Agent</Badge>
-          <Badge tone="amber">
-            {USE_ASYNC_JOBS ? "Celery Queue" : "Local Progress"}
-          </Badge>
-          <Badge tone="rose">Chroma Memory</Badge>
+        <div className="flex flex-col items-start gap-2 md:items-end">
+          <div className="flex w-fit rounded-md border bg-background p-1">
+            {[
+              { label: "生成计划", value: "plan" as const },
+              { label: "资料阅读", value: "reader" as const }
+            ].map((item) => (
+              <button
+                className={cn(
+                  "h-8 rounded px-3 text-xs font-medium transition-colors",
+                  activeView === item.value
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted"
+                )}
+                key={item.value}
+                type="button"
+                onClick={() => setActiveView(item.value)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge tone="teal">LangGraph Agent</Badge>
+            <Badge tone="amber">
+              {USE_ASYNC_JOBS ? "Celery Queue" : "Local Progress"}
+            </Badge>
+            <Badge tone="rose">Chroma Memory</Badge>
+          </div>
         </div>
       </header>
 
@@ -586,6 +773,7 @@ export default function Home() {
         </div>
       ) : null}
 
+      {activeView === "plan" ? (
       <section className="grid gap-6 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
           <Card>
@@ -1104,6 +1292,24 @@ export default function Home() {
           </Card>
         </div>
       </section>
+      ) : (
+        <PdfReaderView
+          error={readerError}
+          loading={readerLoading}
+          materials={pdfMaterials}
+          meta={pdfMeta}
+          page={pdfPage}
+          pageText={pdfText}
+          selectedMaterialId={readerMaterialId}
+          translation={pdfTranslation}
+          zoom={pdfZoom}
+          onMaterialChange={handleReaderMaterialChange}
+          onPageChange={setPdfPage}
+          onUpload={handleReaderPdfUpload}
+          onTranslate={handleTranslatePdfPage}
+          onZoomChange={setPdfZoom}
+        />
+      )}
       <TaskQuizDialog
         open={Boolean(quizTask)}
         task={quizTask}
@@ -1117,6 +1323,7 @@ export default function Home() {
         goalSummaries={goalSummaries}
         isBusy={isBusy}
         loadingStep={loadingStep}
+        readingContext={readingContext}
         requestedPanel={requestedPanel}
         review={review}
         selectedPlan={selectedPlan}
@@ -1129,6 +1336,407 @@ export default function Home() {
       />
     </main>
   );
+}
+
+function PdfReaderView({
+  error,
+  loading,
+  materials,
+  meta,
+  page,
+  pageText,
+  selectedMaterialId,
+  translation,
+  zoom,
+  onMaterialChange,
+  onPageChange,
+  onUpload,
+  onTranslate,
+  onZoomChange
+}: {
+  error: string | null;
+  loading: string | null;
+  materials: CourseMaterial[];
+  meta: PdfMeta | null;
+  page: number;
+  pageText: PdfPageText | null;
+  selectedMaterialId: number | null;
+  translation: PdfPageTranslation | null;
+  zoom: number;
+  onMaterialChange: (materialId: number) => void;
+  onPageChange: (page: number) => void;
+  onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onTranslate: () => Promise<void>;
+  onZoomChange: (zoom: number) => void;
+}) {
+  const selectedMaterial = materials.find((item) => item.id === selectedMaterialId) ?? null;
+  const pageCount = meta?.page_count ?? 1;
+  const readable = Boolean(pageText?.readable);
+  const [readerPanel, setReaderPanel] = useState<"materials" | "translation" | null>(null);
+  const [pageInput, setPageInput] = useState(String(page));
+
+  useEffect(() => {
+    setPageInput(String(page));
+  }, [page]);
+
+  function movePage(offset: number) {
+    onPageChange(Math.min(Math.max(page + offset, 1), pageCount));
+  }
+
+  function jumpToInputPage() {
+    const nextPage = Number(pageInput);
+    if (!Number.isFinite(nextPage)) {
+      setPageInput(String(page));
+      return;
+    }
+    onPageChange(Math.min(Math.max(Math.round(nextPage), 1), pageCount));
+  }
+
+  function toggleReaderPanel(panel: "materials" | "translation") {
+    setReaderPanel((current) => (current === panel ? null : panel));
+  }
+
+  async function translateAndOpenPanel() {
+    setReaderPanel("translation");
+    await onTranslate();
+  }
+
+  return (
+    <section>
+      <Card>
+        <CardHeader>
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="h-5 w-5 text-primary" aria-hidden="true" />
+                资料阅读
+              </CardTitle>
+              <CardDescription>
+                {selectedMaterial
+                  ? `${selectedMaterial.filename} · 第 ${page} 页`
+                  : "选择右侧资料面板中的 PDF 开始阅读"}
+              </CardDescription>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Input
+                  className="h-8 w-20"
+                  min={1}
+                  max={pageCount}
+                  type="number"
+                  value={pageInput}
+                  disabled={!meta}
+                  onChange={(event) => setPageInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      jumpToInputPage();
+                    }
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!meta}
+                  onClick={jumpToInputPage}
+                >
+                  跳转
+                </Button>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!meta || page <= 1}
+                onClick={() => movePage(-1)}
+              >
+                <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+                上一页
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!meta || page >= pageCount}
+                onClick={() => movePage(1)}
+              >
+                下一页
+                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {error ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              {error}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={readable ? "teal" : "amber"}>
+                {readable ? "文本可读取" : "当前页无可提取文本"}
+              </Badge>
+              {meta ? (
+                <span className="text-sm text-muted-foreground">
+                  {page} / {meta.page_count} 页
+                </span>
+              ) : null}
+              {loading === "meta" || loading === "text" ? (
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              ) : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="icon"
+                variant="outline"
+                title="缩小"
+                onClick={() => onZoomChange(Math.max(60, zoom - 10))}
+              >
+                <ZoomOut className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <span className="w-14 text-center text-sm text-muted-foreground">
+                {zoom}%
+              </span>
+              <Button
+                size="icon"
+                variant="outline"
+                title="放大"
+                onClick={() => onZoomChange(Math.min(180, zoom + 10))}
+              >
+                <ZoomIn className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                size="sm"
+                disabled={!readable || loading === "translate"}
+                onClick={() => void translateAndOpenPanel()}
+                title="翻译当前页"
+              >
+                {loading === "translate" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Languages className="h-4 w-4" aria-hidden="true" />
+                )}
+                翻译当前页
+              </Button>
+            </div>
+          </div>
+
+          <div className="relative grid min-h-[900px] gap-3 overflow-hidden xl:grid-cols-[minmax(0,1fr)_48px]">
+            {selectedMaterialId && meta ? (
+              <div className="min-h-[820px] overflow-auto rounded-md border bg-slate-100 p-4">
+                <img
+                  alt={`${meta.filename} 第 ${page} 页`}
+                  className="mx-auto max-w-none rounded-sm border bg-white shadow-sm"
+                  src={api.pdfPageImageUrl(selectedMaterialId, page)}
+                  style={{ width: `${zoom}%` }}
+                />
+              </div>
+            ) : (
+              <div className="min-h-[820px]">
+                <EmptyState text="选择一个 PDF 资料后会显示阅读器。" />
+              </div>
+            )}
+
+            <div className="flex min-h-[820px] flex-col items-center gap-2 rounded-md border bg-background p-2">
+              <Button
+                size="icon"
+                variant={readerPanel === "materials" ? "default" : "ghost"}
+                title="PDF 资料"
+                onClick={() => toggleReaderPanel("materials")}
+              >
+                <FileText className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                size="icon"
+                variant={readerPanel === "translation" ? "default" : "ghost"}
+                title="翻译对照"
+                onClick={() => toggleReaderPanel("translation")}
+              >
+                <Languages className="h-4 w-4" aria-hidden="true" />
+              </Button>
+            </div>
+
+            <div
+              className={cn(
+                "absolute inset-y-0 right-16 z-20 flex w-[360px] flex-col overflow-hidden rounded-md border bg-background shadow-xl transition-all duration-200",
+                readerPanel
+                  ? "translate-x-0 opacity-100"
+                  : "pointer-events-none translate-x-[calc(100%+5rem)] opacity-0"
+              )}
+            >
+                {readerPanel === "materials" ? (
+                  <>
+                    <div className="border-b p-4">
+                      <h3 className="text-sm font-semibold">PDF 资料</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        上传 PDF 到阅读器，或切换当前阅读资料。
+                      </p>
+                    </div>
+                    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+                      <div className="rounded-md border bg-background p-3">
+                        <Label htmlFor="readerPdfUpload">上传 PDF 到阅读器</Label>
+                        <Input
+                          id="readerPdfUpload"
+                          className="mt-2"
+                          type="file"
+                          accept=".pdf,application/pdf"
+                          disabled={loading === "upload"}
+                          onChange={onUpload}
+                        />
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                          只保存为阅读资料，不进行 RAG 建库。
+                        </p>
+                        {loading === "upload" ? (
+                          <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                            <Loader2
+                              className="h-3.5 w-3.5 animate-spin"
+                              aria-hidden="true"
+                            />
+                            正在上传 PDF
+                          </div>
+                        ) : null}
+                      </div>
+                      {materials.length > 0 ? (
+                        <div className="space-y-2">
+                          {materials.map((material) => {
+                            const active = material.id === selectedMaterialId;
+                            return (
+                              <button
+                                className={cn(
+                                  "w-full rounded-md border bg-background p-3 text-left transition-colors hover:bg-muted",
+                                  active && "border-primary bg-teal-50"
+                                )}
+                                key={material.id}
+                                type="button"
+                                onClick={() => onMaterialChange(material.id)}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="line-clamp-2 text-sm font-semibold">
+                                    {material.filename}
+                                  </span>
+                                  <Badge
+                                    tone={
+                                      material.parse_status === "ready"
+                                        ? "teal"
+                                        : "amber"
+                                    }
+                                  >
+                                    {material.parse_status}
+                                  </Badge>
+                                </div>
+                                <p className="mt-2 text-xs text-muted-foreground">
+                                  {material.chunk_count} chunks · PDF
+                                </p>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <EmptyState text="当前目标还没有 PDF 资料。" />
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="border-b p-4">
+                      <h3 className="text-sm font-semibold">翻译对照</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        右侧 AI 聊天会读取当前页可提取文本。
+                      </p>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                      {!readable ? (
+                        <div className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+                          当前页没有可提取文本，可能是扫描版或图片型 PDF。第一版暂不处理 OCR。
+                        </div>
+                      ) : translation ? (
+                        <div className="space-y-3">
+                          <Badge tone={translation.cached ? "neutral" : "teal"}>
+                            {translation.cached ? "缓存翻译" : "新翻译"}
+                          </Badge>
+                          <ReaderMarkdown content={translation.translated_text} />
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+                            点击“翻译当前页”后显示中文对照。
+                          </div>
+                          <div>
+                            <h4 className="mb-2 text-sm font-semibold">
+                              当前页原文预览
+                            </h4>
+                            <ReaderMarkdown
+                              className="line-clamp-[16] text-muted-foreground"
+                              content={pageText?.text ?? ""}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+          </div>
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+function ReaderMarkdown({
+  className,
+  content
+}: {
+  className?: string;
+  content: string;
+}) {
+  return (
+    <div className={cn("chat-markdown text-sm leading-7", className)}>
+      <ReactMarkdown
+        remarkPlugins={[remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={{
+          code: ({ className, children, ...props }) => {
+            const isBlock = /language-/.test(className ?? "");
+            if (!isBlock) {
+              return (
+                <code
+                  className="rounded bg-muted px-1 py-0.5 font-mono text-[0.92em]"
+                  {...props}
+                >
+                  {children}
+                </code>
+              );
+            }
+            return (
+              <code className={cn("block font-mono text-xs", className)} {...props}>
+                {children}
+              </code>
+            );
+          },
+          pre: ({ children }) => (
+            <pre className="overflow-x-auto rounded-md border bg-slate-950 p-3 text-slate-50">
+              {children}
+            </pre>
+          ),
+          ul: ({ children }) => <ul className="list-disc space-y-1 pl-5">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal space-y-1 pl-5">{children}</ol>,
+          blockquote: ({ children }) => (
+            <blockquote className="border-l-2 border-primary/50 pl-3 text-muted-foreground">
+              {children}
+            </blockquote>
+          )
+        }}
+      >
+        {normalizeReaderMarkdown(content)}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function normalizeReaderMarkdown(content: string) {
+  return content
+    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
+    .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
 }
 
 function EmptyState({ text }: { text: string }) {

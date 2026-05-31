@@ -246,12 +246,20 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1, max_length=6000)
 
 
+class ReadingContext(BaseModel):
+    """前端资料阅读器传给聊天助手的当前 PDF 页上下文。"""
+
+    material_id: int
+    page_index: int = Field(ge=1)
+
+
 class ChatStreamRequest(BaseModel):
     """流式聊天接口的请求体。"""
 
     messages: list[ChatMessage] = Field(min_length=1, max_length=30)
     goal_id: int | None = None
     plan_id: int | None = None
+    reading_context: ReadingContext | None = None
 
 
 class CourseMaterialRead(BaseModel):
@@ -267,6 +275,44 @@ class CourseMaterialRead(BaseModel):
     error_message: str | None = None
     chunk_count: int
     chroma_collection: str
+
+
+class MaterialPdfMetaRead(BaseModel):
+    """PDF 阅读器打开资料时需要的基础元信息。"""
+
+    material_id: int
+    filename: str
+    page_count: int
+    readable_pages: list[int]
+
+
+class MaterialPdfPageTextRead(BaseModel):
+    """PDF 单页文本提取结果。"""
+
+    material_id: int
+    filename: str
+    page_index: int
+    readable: bool
+    text: str
+    text_hash: str
+
+
+class PdfPageTranslateRequest(BaseModel):
+    """请求翻译 PDF 当前页。"""
+
+    target_language: str = Field(default="zh-CN", max_length=20)
+
+
+class PdfPageTranslationRead(BaseModel):
+    """PDF 单页翻译响应。"""
+
+    material_id: int
+    page_index: int
+    source_lang: str
+    target_lang: str
+    text_hash: str
+    translated_text: str
+    cached: bool
 
 
 class KnowledgeSearchRequest(BaseModel):

@@ -111,6 +111,37 @@ export type CourseMaterial = {
   chroma_collection: string;
 };
 
+export type PdfMeta = {
+  material_id: number;
+  filename: string;
+  page_count: number;
+  readable_pages: number[];
+};
+
+export type PdfPageText = {
+  material_id: number;
+  filename: string;
+  page_index: number;
+  readable: boolean;
+  text: string;
+  text_hash: string;
+};
+
+export type PdfPageTranslation = {
+  material_id: number;
+  page_index: number;
+  source_lang: string;
+  target_lang: string;
+  text_hash: string;
+  translated_text: string;
+  cached: boolean;
+};
+
+export type ReadingContext = {
+  material_id: number;
+  page_index: number;
+};
+
 export type KnowledgeSearchHit = {
   content: string;
   metadata: Record<string, unknown>;
@@ -318,6 +349,21 @@ export const api = {
     });
   },
 
+  uploadReaderPdf(goalId: number, file: File) {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("build_knowledge", "false");
+    return fetch(`${API_BASE_URL}/goals/${goalId}/materials/upload`, {
+      method: "POST",
+      body
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Upload PDF failed");
+      }
+      return response.json() as Promise<CourseMaterial>;
+    });
+  },
+
   listMaterials(goalId: number) {
     return request<CourseMaterial[]>(`/goals/${goalId}/materials`);
   },
@@ -348,6 +394,7 @@ export const api = {
     messages: ChatMessage[];
     goal_id?: number;
     plan_id?: number;
+    reading_context?: ReadingContext | null;
   }) {
     const response = await fetch(`${API_BASE_URL}/chat/stream`, {
       method: "POST",
@@ -359,5 +406,27 @@ export const api = {
       throw new Error((await response.text()) || "Chat request failed");
     }
     return response.body.getReader();
+  },
+
+  getPdfMeta(materialId: number) {
+    return request<PdfMeta>(`/materials/${materialId}/pdf/meta`);
+  },
+
+  getPdfPageText(materialId: number, pageIndex: number) {
+    return request<PdfPageText>(`/materials/${materialId}/pdf/pages/${pageIndex}/text`);
+  },
+
+  translatePdfPage(materialId: number, pageIndex: number, targetLanguage = "zh-CN") {
+    return request<PdfPageTranslation>(
+      `/materials/${materialId}/pdf/pages/${pageIndex}/translate`,
+      {
+        method: "POST",
+        body: JSON.stringify({ target_language: targetLanguage })
+      }
+    );
+  },
+
+  pdfPageImageUrl(materialId: number, pageIndex: number, zoom = 2) {
+    return `${API_BASE_URL}/materials/${materialId}/pdf/pages/${pageIndex}/image?zoom=${zoom}`;
   }
 };

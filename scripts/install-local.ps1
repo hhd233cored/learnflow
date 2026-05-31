@@ -1,5 +1,6 @@
 #requires -Version 5.1
 param(
+    [switch]$InstallSystemDeps,
     [switch]$ForceEnv,
     [switch]$SkipBackend,
     [switch]$SkipFrontend
@@ -12,6 +13,11 @@ $BackendDir = Join-Path $RootDir "backend"
 $FrontendDir = Join-Path $RootDir "frontend"
 $BackendVenvDir = Join-Path $BackendDir ".venv"
 $BackendVenvPython = Join-Path $BackendVenvDir "Scripts\python.exe"
+$MinPythonVersion = [Version]"3.11.0"
+$MinNodeVersion = [Version]"20.0.0"
+$ResolvedPythonPath = $null
+$ResolvedNodePath = $null
+$ResolvedNpmPath = $null
 
 function Write-Step {
     param([string]$Message)
@@ -34,6 +40,182 @@ function Get-RequiredCommandPath {
     }
 
     throw "Command not found: $($Names -join ', '). $InstallHint"
+}
+
+function Find-CommandPath {
+    param([string[]]$Names)
+
+    foreach ($name in $Names) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($null -ne $command) {
+            return $command.Source
+        }
+    }
+
+    return $null
+}
+
+function ConvertTo-VersionOrNull {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $cleanValue = $Value.Trim().TrimStart("v")
+    try {
+        return [Version]$cleanValue
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-PythonVersion {
+    param([string]$PythonPath)
+
+    try {
+        $leafName = Split-Path -Leaf $PythonPath
+        if ($leafName -like "py*") {
+            $output = & $PythonPath -3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2>$null
+        }
+        else {
+            $output = & $PythonPath -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" 2>$null
+        }
+
+        return ConvertTo-VersionOrNull ($output | Select-Object -First 1)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-NodeVersion {
+    param([string]$NodePath)
+
+    try {
+        $output = & $NodePath --version 2>$null
+        return ConvertTo-VersionOrNull ($output | Select-Object -First 1)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Resolve-PythonPath {
+    $candidates = @("python.exe", "python", "py.exe", "py")
+    foreach ($name in $candidates) {
+        $path = Find-CommandPath -Names @($name)
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            continue
+        }
+
+        $version = Get-PythonVersion -PythonPath $path
+        if ($null -ne $version -and $version -ge $MinPythonVersion) {
+            Write-Host "Python found: $path ($version)" -ForegroundColor Green
+            return $path
+        }
+
+        if ($null -ne $version) {
+            Write-Host "Python too old: $path ($version), need $MinPythonVersion+" -ForegroundColor Yellow
+        }
+    }
+
+    return $null
+}
+
+function Resolve-NodePath {
+    $path = Find-CommandPath -Names @("node.exe", "node")
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $null
+    }
+
+    $version = Get-NodeVersion -NodePath $path
+    if ($null -ne $version -and $version -ge $MinNodeVersion) {
+        Write-Host "Node.js found: $path ($version)" -ForegroundColor Green
+        return $path
+    }
+
+    if ($null -ne $version) {
+        Write-Host "Node.js too old: $path ($version), need $MinNodeVersion+" -ForegroundColor Yellow
+    }
+
+    return $null
+}
+
+function Refresh-ProcessPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+}
+
+function Install-WingetPackage {
+    param(
+        [string]$PackageId,
+        [string]$DisplayName
+    )
+
+    $wingetPath = Find-CommandPath -Names @("winget.exe", "winget")
+    if ([string]::IsNullOrWhiteSpace($wingetPath)) {
+        throw "winget not found. Please install App Installer from Microsoft Store, or install $DisplayName manually."
+    }
+
+    Write-Host "Installing $DisplayName with winget..." -ForegroundColor Cyan
+    & $wingetPath install --id $PackageId -e --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget failed to install $DisplayName. Exit code: $LASTEXITCODE"
+    }
+
+    Refresh-ProcessPath
+}
+
+function Ensure-Python {
+    $pythonPath = Resolve-PythonPath
+    if (-not [string]::IsNullOrWhiteSpace($pythonPath)) {
+        return $pythonPath
+    }
+
+    if (-not $InstallSystemDeps) {
+        throw "Python $MinPythonVersion+ not found. Install it manually, or run: .\install-local.bat --install-system-deps"
+    }
+
+    Install-WingetPackage -PackageId "Python.Python.3.11" -DisplayName "Python 3.11"
+    $pythonPath = Resolve-PythonPath
+    if ([string]::IsNullOrWhiteSpace($pythonPath)) {
+        throw "Python was installed but is not available in this terminal yet. Restart PowerShell and run .\install-local.bat again."
+    }
+
+    return $pythonPath
+}
+
+function Ensure-NodeAndNpm {
+    $nodePath = Resolve-NodePath
+    $npmPath = Find-CommandPath -Names @("npm.cmd", "npm")
+
+    if (-not [string]::IsNullOrWhiteSpace($nodePath) -and -not [string]::IsNullOrWhiteSpace($npmPath)) {
+        Write-Host "npm found: $npmPath" -ForegroundColor Green
+        return @{
+            Node = $nodePath
+            Npm = $npmPath
+        }
+    }
+
+    if (-not $InstallSystemDeps) {
+        throw "Node.js $MinNodeVersion+ or npm not found. Install Node.js LTS manually, or run: .\install-local.bat --install-system-deps"
+    }
+
+    Install-WingetPackage -PackageId "OpenJS.NodeJS.LTS" -DisplayName "Node.js LTS"
+    $nodePath = Resolve-NodePath
+    $npmPath = Find-CommandPath -Names @("npm.cmd", "npm")
+    if ([string]::IsNullOrWhiteSpace($nodePath) -or [string]::IsNullOrWhiteSpace($npmPath)) {
+        throw "Node.js was installed but node/npm is not available in this terminal yet. Restart PowerShell and run .\install-local.bat again."
+    }
+
+    Write-Host "npm found: $npmPath" -ForegroundColor Green
+    return @{
+        Node = $nodePath
+        Npm = $npmPath
+    }
 }
 
 function Write-Utf8File {
@@ -104,6 +286,23 @@ if (-not (Test-Path -LiteralPath $FrontendDir)) {
     throw "Frontend directory not found: $FrontendDir"
 }
 
+Write-Step "Check system dependencies"
+if (-not $SkipBackend) {
+    $ResolvedPythonPath = Ensure-Python
+}
+else {
+    Write-Host "Python check skipped with -SkipBackend."
+}
+
+if (-not $SkipFrontend) {
+    $nodeTools = Ensure-NodeAndNpm
+    $ResolvedNodePath = $nodeTools.Node
+    $ResolvedNpmPath = $nodeTools.Npm
+}
+else {
+    Write-Host "Node.js/npm check skipped with -SkipFrontend."
+}
+
 Write-Step "Create local runtime directories"
 New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\materials") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\chroma") | Out-Null
@@ -147,9 +346,7 @@ Write-EnvFileIfNeeded -FilePath $FrontendEnvPath -DirectoryPath $FrontendDir -Co
 
 if (-not $SkipBackend) {
     Write-Step "Install backend Python dependencies"
-    $PythonPath = Get-RequiredCommandPath `
-        -Names @("python.exe", "python", "py.exe", "py") `
-        -InstallHint "Install Python 3.11+ and enable Add Python to PATH."
+    $PythonPath = $ResolvedPythonPath
 
     if (-not (Test-Path -LiteralPath $BackendVenvPython)) {
         Write-Host "Create virtual environment: $BackendVenvDir"
@@ -173,12 +370,8 @@ else {
 
 if (-not $SkipFrontend) {
     Write-Step "Install frontend Node dependencies"
-    $NodePath = Get-RequiredCommandPath `
-        -Names @("node.exe", "node") `
-        -InstallHint "Install Node.js 20 LTS or newer."
-    $NpmPath = Get-RequiredCommandPath `
-        -Names @("npm.cmd", "npm") `
-        -InstallHint "Make sure Node.js is available in PATH."
+    $NodePath = $ResolvedNodePath
+    $NpmPath = $ResolvedNpmPath
 
     & $NodePath --version
     Push-Location $FrontendDir
@@ -195,4 +388,5 @@ else {
 
 Write-Step "Install finished"
 Write-Host "Start the project with: .\start-local.bat"
+Write-Host "Install missing Python/Node with: .\install-local.bat --install-system-deps"
 Write-Host "Regenerate env files with: powershell -ExecutionPolicy Bypass -File .\scripts\install-local.ps1 -ForceEnv"

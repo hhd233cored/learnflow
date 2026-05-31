@@ -490,6 +490,17 @@ def mark_material_failed(
     return material
 
 
+def mark_material_uploaded(db: Session, material: models.CourseMaterial) -> models.CourseMaterial:
+    """标记资料仅用于阅读器，不进入解析/建库流程。"""
+
+    material.parse_status = "uploaded"
+    material.error_message = None
+    material.chunk_count = 0
+    db.commit()
+    db.refresh(material)
+    return material
+
+
 def replace_material_chunks(
     db: Session,
     material: models.CourseMaterial,
@@ -523,6 +534,54 @@ def replace_material_chunks(
     db.commit()
     db.refresh(material)
     return material
+
+
+def get_page_translation(
+    db: Session,
+    material_id: int,
+    page_index: int,
+    target_lang: str,
+    text_hash: str,
+) -> models.MaterialPageTranslation | None:
+    """读取仍然匹配当前页面文本的翻译缓存。"""
+
+    stmt = select(models.MaterialPageTranslation).where(
+        models.MaterialPageTranslation.material_id == material_id,
+        models.MaterialPageTranslation.page_index == page_index,
+        models.MaterialPageTranslation.target_lang == target_lang,
+        models.MaterialPageTranslation.text_hash == text_hash,
+    )
+    return db.scalars(stmt).first()
+
+
+def upsert_page_translation(
+    db: Session,
+    material_id: int,
+    page_index: int,
+    source_lang: str,
+    target_lang: str,
+    text_hash: str,
+    translated_text: str,
+) -> models.MaterialPageTranslation:
+    """写入或更新 PDF 单页翻译缓存。"""
+
+    translation = get_page_translation(db, material_id, page_index, target_lang, text_hash)
+    if translation is None:
+        translation = models.MaterialPageTranslation(
+            material_id=material_id,
+            page_index=page_index,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            text_hash=text_hash,
+            translated_text=translated_text,
+        )
+        db.add(translation)
+    else:
+        translation.source_lang = source_lang
+        translation.translated_text = translated_text
+    db.commit()
+    db.refresh(translation)
+    return translation
 
 
 def create_job(

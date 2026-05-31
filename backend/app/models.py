@@ -194,6 +194,9 @@ class CourseMaterial(TimestampMixin, Base):
     chunks: Mapped[list["DocumentChunk"]] = relationship(
         back_populates="material", cascade="all, delete-orphan"
     )
+    page_translations: Mapped[list["MaterialPageTranslation"]] = relationship(
+        back_populates="material", cascade="all, delete-orphan"
+    )
 
 
 class DocumentChunk(TimestampMixin, Base):
@@ -211,6 +214,28 @@ class DocumentChunk(TimestampMixin, Base):
     chroma_document_id: Mapped[str] = mapped_column(String(120), nullable=False)
 
     material: Mapped[CourseMaterial] = relationship(back_populates="chunks")
+
+
+class MaterialPageTranslation(TimestampMixin, Base):
+    """PDF 单页翻译缓存。
+
+    翻译按 material + page + target_lang + text_hash 缓存。PDF 内容不变时，
+    用户重复打开同一页不会再次消耗 LLM 请求。
+    """
+
+    __tablename__ = "material_page_translations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    material_id: Mapped[int] = mapped_column(
+        ForeignKey("course_materials.id"), nullable=False, index=True
+    )
+    page_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_lang: Mapped[str] = mapped_column(String(20), default="auto", nullable=False)
+    target_lang: Mapped[str] = mapped_column(String(20), default="zh-CN", nullable=False)
+    text_hash: Mapped[str] = mapped_column(String(80), nullable=False)
+    translated_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    material: Mapped[CourseMaterial] = relationship(back_populates="page_translations")
 
 
 class Job(TimestampMixin, Base):

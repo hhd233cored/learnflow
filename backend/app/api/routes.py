@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import crud, models
@@ -20,6 +20,10 @@ from app.schemas import (
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     LLMHealthRead,
+    MaterialPdfMetaRead,
+    MaterialPdfPageTextRead,
+    PdfPageTranslateRequest,
+    PdfPageTranslationRead,
     PlanAdjustmentRead,
     QuizGenerateRequest,
     QuizSubmitRequest,
@@ -35,6 +39,7 @@ from app.services.document_enrichment import enrich_chunks
 from app.services.knowledge_base import ChromaKnowledgeBase, collection_name_for_goal
 from app.services.material_pipeline import build_material_knowledge_base
 from app.services.materials import save_upload_file
+from app.services.pdf_reader import pdf_meta, pdf_page_text, render_pdf_page_png
 from app.services.quiz import generate_quiz_for_task, grade_quiz_answers
 from app.tasks.jobs import generate_goal_plan_task, parse_material_task
 
@@ -248,6 +253,7 @@ async def upload_course_material(
     goal_id: int,
     plan_id: int | None = Form(default=None),
     day_index: int | None = Form(default=None),
+    build_knowledge: bool = Form(default=True),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -276,6 +282,11 @@ async def upload_course_material(
         storage_path=storage_path,
         chroma_collection=collection_name_for_goal(goal_id),
     )
+
+    if not build_knowledge:
+        if file_type != "pdf":
+            return crud.mark_material_failed(db, material, "阅读器直传第一版只支持 PDF。")
+        return crud.mark_material_uploaded(db, material)
 
     try:
         return await build_material_knowledge_base(
@@ -349,6 +360,113 @@ def read_course_material(material_id: int, db: Session = Depends(get_db)):
     if material is None:
         raise HTTPException(status_code=404, detail="Course material not found")
     return material
+
+
+@router.get("/materials/{material_id}/pdf/meta", response_model=MaterialPdfMetaRead)
+def read_pdf_meta(material_id: int, db: Session = Depends(get_db)):
+    """读取 PDF 页数和可提取文本的页码列表。"""
+
+    material = _get_material_or_404(db, material_id)
+    try:
+        return pdf_meta(material)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/materials/{material_id}/pdf/pages/{page_index}/image")
+def read_pdf_page_image(
+    material_id: int,
+    page_index: int,
+    zoom: float = 2,
+    db: Session = Depends(get_db),
+):
+    """把 PDF 单页渲染为 PNG 图片，供前端阅读器显示。"""
+
+    material = _get_material_or_404(db, material_id)
+    try:
+        image = render_pdf_page_png(material, page_index, zoom)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(content=image, media_type="image/png")
+
+
+@router.get(
+    "/materials/{material_id}/pdf/pages/{page_index}/text",
+    response_model=MaterialPdfPageTextRead,
+)
+def read_pdf_page_text(material_id: int, page_index: int, db: Session = Depends(get_db)):
+    """读取 PDF 单页可提取文本；扫描版页面会返回 readable=false。"""
+
+    material = _get_material_or_404(db, material_id)
+    try:
+        return pdf_page_text(material, page_index)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/materials/{material_id}/pdf/pages/{page_index}/translate",
+    response_model=PdfPageTranslationRead,
+)
+async def translate_pdf_page(
+    material_id: int,
+    page_index: int,
+    payload: PdfPageTranslateRequest,
+    db: Session = Depends(get_db),
+):
+    """翻译 PDF 当前页，并按页面文本 hash 缓存结果。"""
+
+    material = _get_material_or_404(db, material_id)
+    try:
+        page = pdf_page_text(material, page_index)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if not page["readable"]:
+        raise HTTPException(status_code=400, detail="当前页没有可提取文本，暂不处理图片型 PDF。")
+
+    cached = crud.get_page_translation(
+        db,
+        material_id=material.id,
+        page_index=page_index,
+        target_lang=payload.target_language,
+        text_hash=page["text_hash"],
+    )
+    if cached is not None:
+        return {
+            "material_id": material.id,
+            "page_index": page_index,
+            "source_lang": cached.source_lang,
+            "target_lang": cached.target_lang,
+            "text_hash": cached.text_hash,
+            "translated_text": cached.translated_text,
+            "cached": True,
+        }
+
+    translated_text = await _translate_pdf_page_text(
+        text=page["text"],
+        filename=material.filename,
+        page_index=page_index,
+        target_language=payload.target_language,
+    )
+    translation = crud.upsert_page_translation(
+        db,
+        material_id=material.id,
+        page_index=page_index,
+        source_lang="auto",
+        target_lang=payload.target_language,
+        text_hash=page["text_hash"],
+        translated_text=translated_text,
+    )
+    return {
+        "material_id": material.id,
+        "page_index": page_index,
+        "source_lang": translation.source_lang,
+        "target_lang": translation.target_lang,
+        "text_hash": translation.text_hash,
+        "translated_text": translation.translated_text,
+        "cached": False,
+    }
 
 
 @router.get("/jobs/{job_id}", response_model=JobRead)
@@ -705,6 +823,13 @@ async def _chat_tool_result(payload: ChatStreamRequest, db: Session) -> str | No
                 f"原因：{adjustment.reason}"
             )
 
+        if _wants_pdf_page_read(message) and payload.reading_context is not None:
+            page_context = _reading_page_context(db, payload)
+            return (
+                "ReadPDFPageTool 已执行：\n"
+                + (page_context or "当前页没有可提取文本，暂不处理图片型 PDF。")
+            )
+
         if plan is not None and _wants_review(message):
             review = await _create_review_for_plan(db, plan, message)
             return (
@@ -747,6 +872,10 @@ def _wants_knowledge_insert(message: str) -> bool:
     return any(token in message for token in ["加入知识库", "写入知识库", "补充到知识库", "记到知识库"])
 
 
+def _wants_pdf_page_read(message: str) -> bool:
+    return any(token in message for token in ["当前页", "这一页", "这页", "PDF", "pdf", "阅读页"])
+
+
 def _extract_snippet_content(message: str) -> str:
     """尽量从自然语言里抽出要写入知识库的正文。"""
 
@@ -773,6 +902,15 @@ def _get_goal_or_404(db: Session, goal_id: int) -> models.LearningGoal:
     if goal is None:
         raise HTTPException(status_code=404, detail="Learning goal not found")
     return goal
+
+
+def _get_material_or_404(db: Session, material_id: int) -> models.CourseMaterial:
+    """读取课程资料；不存在时抛出 FastAPI 404。"""
+
+    material = crud.get_material(db, material_id)
+    if material is None:
+        raise HTTPException(status_code=404, detail="Course material not found")
+    return material
 
 
 def _quiz_payload(quiz: models.TaskQuiz) -> dict:
@@ -898,6 +1036,10 @@ def _chat_context(payload: ChatStreamRequest, db: Session) -> str:
             )
         )
 
+    reading_context = _reading_page_context(db, payload)
+    if reading_context:
+        sections.append(reading_context)
+
     knowledge_hits = _chat_knowledge_hits(goal, plan, last_user_message)
     if knowledge_hits:
         hit_lines = []
@@ -914,6 +1056,39 @@ def _chat_context(payload: ChatStreamRequest, db: Session) -> str:
     return "\n\n".join(sections)
 
 
+def _reading_page_context(db: Session, payload: ChatStreamRequest) -> str:
+    """读取前端 PDF 阅读器当前页文本，作为聊天上下文或工具结果。"""
+
+    if payload.reading_context is None:
+        return ""
+
+    material = crud.get_material(db, payload.reading_context.material_id)
+    if material is None:
+        return "当前阅读页：资料不存在。"
+
+    try:
+        page = pdf_page_text(material, payload.reading_context.page_index)
+    except Exception as exc:
+        return f"当前阅读页：无法读取 PDF 页面。原因：{exc}"
+
+    if not page["readable"]:
+        return (
+            f"当前阅读页：{material.filename} 第 {payload.reading_context.page_index} 页。"
+            "该页没有可提取文本，可能是扫描版或图片型 PDF，第一版暂不处理 OCR。"
+        )
+
+    text = page["text"][:5000]
+    return "\n".join(
+        [
+            "当前阅读页：",
+            f"- 文件：{material.filename}",
+            f"- 页码：第 {payload.reading_context.page_index} 页",
+            "- 页面文本：",
+            text,
+        ]
+    )
+
+
 def _chat_system_prompt(context: str) -> str:
     """构造学习助手的系统提示词。"""
 
@@ -925,7 +1100,7 @@ def _chat_system_prompt(context: str) -> str:
             "请使用 Markdown 组织答案；代码、命令和配置用 fenced code block。",
             "数学公式请使用 LaTeX：行内公式用 \\(...\\)，独立公式用 \\[...\\]。",
             "如果提供了当前计划、任务或课程资料上下文，请优先结合这些内容。",
-            "系统已注册轻量工具：KnowledgeSearchTool、KnowledgeIngestTool、ReviewTool、AdjustPlanTool；如果上下文里出现工具结果，请直接解释结果并给下一步建议。",
+            "系统已注册轻量工具：KnowledgeSearchTool、KnowledgeIngestTool、ReviewTool、AdjustPlanTool、ReadPDFPageTool；如果上下文里出现工具结果，请直接解释结果并给下一步建议。",
             "不要编造资料中没有的页码、公式编号或教材原句。",
             "当前上下文如下：",
             context or "暂无学习上下文。",
@@ -985,6 +1160,34 @@ def _chat_knowledge_hits(
         return ChromaKnowledgeBase().query(goal_id, query, top_k=3)
     except Exception:
         return []
+
+
+async def _translate_pdf_page_text(
+    text: str, filename: str, page_index: int, target_language: str
+) -> str:
+    """调用 LLM 翻译 PDF 当前页；不可用时返回带说明的原文。"""
+
+    fallback = {
+        "translated_text": (
+            "当前未能调用 LLM 完成翻译。以下保留原文，方便继续阅读：\n\n"
+            f"{text[:4000]}"
+        )
+    }
+    result = await DeepSeekClient().complete_json(
+        system_prompt=(
+            "你是课程资料翻译助手。请把 PDF 当前页翻译成目标语言，保留 Markdown 结构、"
+            "数学公式、术语和编号；不要扩写，不要编造原文中没有的内容。必须返回 JSON。"
+        ),
+        user_payload={
+            "filename": filename,
+            "page_index": page_index,
+            "target_language": target_language,
+            "source_text": text[:12000],
+            "schema": {"translated_text": "翻译结果"},
+        },
+        fallback=fallback,
+    )
+    return str(result.get("translated_text") or fallback["translated_text"]).strip()
 
 
 def _parse_key_topics(raw: str) -> list[str]:
