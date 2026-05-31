@@ -1696,7 +1696,8 @@ function ReaderMarkdown({
         rehypePlugins={[rehypeKatex]}
         components={{
           code: ({ className, children, ...props }) => {
-            const isBlock = /language-/.test(className ?? "");
+            const isBlock =
+              /language-/.test(className ?? "") || String(children).includes("\n");
             if (!isBlock) {
               return (
                 <code

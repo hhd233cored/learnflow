@@ -69,7 +69,7 @@ type ChatDrawerProps = {
   onAdjustPlan: () => Promise<void>;
   onCreateReview: () => Promise<void>;
   onFeedbackChange: (value: string) => void;
-  onRequestedPanelHandled?: () => void;Agent
+  onRequestedPanelHandled?: () => void;
   onWorkspaceChange?: () => Promise<void>;
 };
 
@@ -1634,7 +1634,8 @@ function MarkdownMessage({ content }: { content: string }) {
         components={{
           p: ({ children }) => <p>{children}</p>,
           code: ({ className, children, ...props }) => {
-            const isBlock = /language-/.test(className ?? "");
+            const isBlock =
+              /language-/.test(className ?? "") || String(children).includes("\n");
             if (!isBlock) {
               return (
                 <code

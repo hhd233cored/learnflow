@@ -131,6 +131,16 @@ select {
   margin-top: 0.65rem;
 }
 
+.chat-markdown pre code {
+  display: block;
+  background: transparent;
+  border-radius: 0;
+  color: inherit;
+  overflow-wrap: normal;
+  padding: 0;
+  white-space: pre;
+}
+
 .chat-markdown .katex-display {
   margin: 0.75rem 0;
   overflow-x: auto;
