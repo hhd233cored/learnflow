@@ -6,8 +6,10 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
+from app import models
 from app.core.config import get_settings
 from app.services.document_parser import SUPPORTED_EXTENSIONS
+from app.services.paddle_ocr import ocr_cache_dir
 
 
 def save_upload_file(upload: UploadFile, goal_id: int) -> tuple[str, str, str]:
@@ -34,3 +36,23 @@ def save_upload_file(upload: UploadFile, goal_id: int) -> tuple[str, str, str]:
         shutil.copyfileobj(upload.file, buffer)
 
     return str(target), original_name, suffix.lstrip(".")
+
+
+def delete_material_files(material: models.CourseMaterial) -> None:
+    """删除素材原始文件和对应的本地 OCR 缓存。"""
+
+    storage_path = material.storage_path or ""
+    if not storage_path.startswith("manual://"):
+        path = Path(storage_path)
+        if path.exists() and path.is_file():
+            path.unlink()
+        parent = path.parent
+        if parent.exists() and parent.is_dir():
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+    cache_dir = ocr_cache_dir(material)
+    if cache_dir.exists() and cache_dir.is_dir():
+        shutil.rmtree(cache_dir)

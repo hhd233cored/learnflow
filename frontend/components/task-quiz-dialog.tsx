@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { api } from "@/lib/api";
 import type {
@@ -336,7 +337,7 @@ function MarkdownContent({
       className={cn("chat-markdown quiz-markdown", inline && "inline-markdown", className)}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => (inline ? <span>{children}</span> : <p>{children}</p>),
@@ -380,7 +381,9 @@ function MarkdownContent({
 }
 
 function normalizeQuizMarkdown(content: string) {
-  const mathNormalized = content
+  const mathNormalized = normalizeAccidentalIndentedMarkdown(
+    normalizeCompactMarkdownTables(content)
+  )
     .replace(/\\\[((?:.|\n)*?)\\\]/g, (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
     .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
 
@@ -417,4 +420,43 @@ function normalizeQuizMarkdown(content: string) {
     })
     .replace(/sqrt\(lambda_max\)/gi, "$\\sqrt{\\lambda_{\\max}}$")
     .replace(/lambda_max/gi, "$\\lambda_{\\max}$");
+}
+
+function normalizeCompactMarkdownTables(content: string) {
+  return content
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      const pipeCount = (trimmed.match(/\|/g) ?? []).length;
+      const looksLikeCompactTable =
+        trimmed.startsWith("|") && pipeCount >= 8 && /\|\s*:?-{3,}:?\s*\|/.test(trimmed);
+
+      if (!looksLikeCompactTable) {
+        return line;
+      }
+
+      return line.replace(/\|\s+\|/g, "|\n|");
+    })
+    .join("\n");
+}
+
+function normalizeAccidentalIndentedMarkdown(content: string) {
+  let insideFence = false;
+
+  return content
+    .split("\n")
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence) {
+        return line;
+      }
+
+      const looksLikeMarkdownText =
+        /^\s{4,}(#{1,6}\s|\*\*|[-*+]\s|\d+\.\s|>\s|\|)/.test(line);
+      return looksLikeMarkdownText ? line.trimStart() : line;
+    })
+    .join("\n");
 }

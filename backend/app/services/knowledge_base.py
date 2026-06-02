@@ -34,6 +34,7 @@ class ChromaKnowledgeBase:
         filename: str,
         chunks: list[str],
         enrichments: list[dict[str, Any]] | None = None,
+        chunk_metadatas: list[dict[str, Any]] | None = None,
         plan_id: int | None = None,
         day_index: int | None = None,
         source_type: str = "material",
@@ -62,11 +63,12 @@ class ChromaKnowledgeBase:
                     "material_id": material_id,
                     "chunk_index": index,
                     "filename": filename,
-                    "source": f"{filename}#chunk-{index}",
+                    "source": _chunk_source(filename, index, chunk_metadatas),
                     "source_name": filename,
                     "source_type": source_type,
                     "plan_id": plan_id,
                     "day_index": day_index,
+                    **_chunk_metadata(chunk_metadatas, index),
                 },
                 enrichments,
                 index,
@@ -134,6 +136,18 @@ class ChromaKnowledgeBase:
         except Exception:
             return
 
+    def delete_material_documents(self, goal_id: int, material_id: int) -> None:
+        """删除某个素材写入 Chroma 的所有 document。"""
+
+        try:
+            collection = self.client.get_collection(
+                name=collection_name_for_goal(goal_id),
+                embedding_function=self.embedding_function,
+            )
+            collection.delete(where={"material_id": material_id})
+        except Exception:
+            return
+
 
 def _document_for_embedding(
     raw_chunk: str, enrichments: list[dict[str, Any]] | None, index: int
@@ -162,6 +176,28 @@ def _metadata_for_chunk(
             }
         )
     return _compact_metadata(base)
+
+
+def _chunk_metadata(
+    chunk_metadatas: list[dict[str, Any]] | None, index: int
+) -> dict[str, Any]:
+    """返回某个 chunk 额外 metadata，例如 OCR 页码。"""
+
+    if not chunk_metadatas or index >= len(chunk_metadatas):
+        return {}
+    return dict(chunk_metadatas[index])
+
+
+def _chunk_source(
+    filename: str, index: int, chunk_metadatas: list[dict[str, Any]] | None
+) -> str:
+    """生成可读的 chunk 来源标识。"""
+
+    metadata = _chunk_metadata(chunk_metadatas, index)
+    page_index = metadata.get("page_index")
+    if page_index is not None:
+        return f"{filename}#page-{page_index}-chunk-{index}"
+    return f"{filename}#chunk-{index}"
 
 
 def _compact_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

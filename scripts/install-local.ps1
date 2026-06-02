@@ -306,6 +306,7 @@ else {
 Write-Step "Create local runtime directories"
 New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\materials") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\chroma") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\ocr") | Out-Null
 
 Write-Step "Prepare local environment files"
 $BackendEnvPath = Join-Path $BackendDir ".env"
@@ -319,8 +320,16 @@ REDIS_URL=redis://localhost:6379/0
 
 # Fill this key to use DeepSeek. Leave it empty to use local fallback rules.
 DEEPSEEK_API_KEY=
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
+
+# Optional: enable PaddleOCR-VL for PDF OCR before RAG indexing and reading.
+# Keep the token only in backend/.env; do not commit it to GitHub.
+OCR_PROVIDER=none
+PADDLE_OCR_TOKEN=
+PADDLE_OCR_JOB_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+PADDLE_OCR_MODEL=PaddleOCR-VL-1.6
+OCR_STORAGE_DIR=./storage/ocr
 
 # Allow the local Next.js dev server to access FastAPI.
 CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000

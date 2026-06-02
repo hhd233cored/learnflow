@@ -25,6 +25,7 @@ import type { DrawerPanel } from "@/components/chat-drawer";
 import { TaskQuizDialog } from "@/components/task-quiz-dialog";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type {
   Adjustment,
@@ -116,21 +117,77 @@ function getPlanJobLabel(job: Job | null) {
     return "等待进入任务队列";
   }
 
+  const message = job.result_json?.message;
+  if (typeof message === "string" && message.trim()) {
+    return message;
+  }
+
   const stage = job.result_json?.stage;
+  if (stage === "ocr_running") {
+    return "正在 OCR 识别 PDF";
+  }
+  if (stage === "chunking") {
+    return "正在切分 OCR Markdown";
+  }
+  if (stage === "enriching") {
+    return "正在生成知识片段摘要";
+  }
+  if (stage === "indexing") {
+    return "正在写入 Chroma 知识库";
+  }
+  if (stage === "rag_querying") {
+    return "正在检索课程知识库";
+  }
   if (stage === "planning") {
     return "正在拆解阶段计划与每日安排";
+  }
+  if (stage === "saving_plan") {
+    return "正在保存学习计划";
   }
   return "正在生成学习计划";
 }
 
-function createLocalPlanJob(progress = 8): Job {
-  return {
-    id: 0,
-    job_type: "local_generate_goal_plan",
-    status: "running",
-    progress,
-    result_json: { stage: "planning" }
-  };
+function getPlanJobDetails(job: Job | null) {
+  const result = job?.result_json;
+  if (!result) {
+    return [];
+  }
+
+  const details: string[] = [];
+  const currentFile = result.current_file;
+  if (typeof currentFile === "string" && currentFile.trim()) {
+    details.push(`当前文件：${currentFile}`);
+  }
+
+  const currentPage = result.current_page;
+  const totalPages = result.total_pages;
+  if (
+    (typeof currentPage === "number" || typeof currentPage === "string") &&
+    (typeof totalPages === "number" || typeof totalPages === "string")
+  ) {
+    details.push(`OCR 页数：${currentPage} / ${totalPages}`);
+  }
+
+  const fileIndex = result.file_index;
+  const fileCount = result.file_count;
+  if (
+    (typeof fileIndex === "number" || typeof fileIndex === "string") &&
+    (typeof fileCount === "number" || typeof fileCount === "string")
+  ) {
+    details.push(`资料进度：${fileIndex} / ${fileCount}`);
+  }
+
+  const chunkCount = result.chunk_count;
+  if (typeof chunkCount === "number" || typeof chunkCount === "string") {
+    details.push(`知识片段：${chunkCount}`);
+  }
+
+  const knowledgeHits = result.knowledge_hits;
+  if (typeof knowledgeHits === "number" || typeof knowledgeHits === "string") {
+    details.push(`RAG 命中：${knowledgeHits}`);
+  }
+
+  return details;
 }
 
 function selectedPlanStorageKey(goalId: number) {
@@ -322,7 +379,7 @@ export default function Home() {
   async function pollPlanJob(jobId: number, initialJob: Job) {
     let currentJob = initialJob;
 
-    // 前端通过轮询 jobs 表获得粗粒度进度；真正的耗时工作由 Celery worker 执行。
+    // 前端通过轮询 jobs 表获得进度；本地模式由 FastAPI 后台任务更新进度。
     for (let count = 0; count < MAX_PLAN_POLL_COUNT; count += 1) {
       setPlanJob(currentJob);
 
@@ -337,7 +394,7 @@ export default function Home() {
       currentJob = await api.getJob(jobId);
     }
 
-    throw new Error("计划生成时间较长，请确认 Redis 和 Celery worker 正在运行。");
+    throw new Error("计划生成时间较长，请查看后端日志或稍后刷新历史计划。");
   }
 
   async function ensureTasksForPlan(plan: StudyPlan) {
@@ -530,6 +587,12 @@ export default function Home() {
   }
 
   async function handleCreateGoal() {
+    const title = form.title.trim();
+    if (title.length < 2) {
+      setError("请先填写至少 2 个字符的学习目标。");
+      return;
+    }
+
     const keyTopics = form.keyTopics
       .split(/[,，]/)
       .map((item) => item.trim())
@@ -546,7 +609,7 @@ export default function Home() {
     setLoadingStep("goal");
 
     const payload = {
-      title: form.title,
+      title,
       goal_type: form.goalType,
       exam_date: form.goalType === "exam" ? form.examDate : null,
       duration_days: form.goalType === "duration" ? Number(form.durationDays) : null,
@@ -570,31 +633,16 @@ export default function Home() {
 
         createdGoal = await api.getGoal(goalId);
       } else {
-        // 本地测试默认走同步接口，避免依赖 Redis/Celery；进度条由前端模拟。
-        setPlanJob(createLocalPlanJob());
-        const timer = window.setInterval(() => {
-          setPlanJob((current) => {
-            if (!current || current.status !== "running") {
-              return current;
-            }
-            return {
-              ...current,
-              progress: Math.min(current.progress + 12, 92)
-            };
-          });
-        }, 700);
+        const job = await api.createGoalWithMaterialsLocalJob(payload, selectedFiles);
+        setPlanJob(job);
 
-        try {
-          createdGoal = await api.createGoalWithMaterials(payload, selectedFiles);
-        } finally {
-          window.clearInterval(timer);
+        const completedJob = await pollPlanJob(job.id, job);
+        const goalId = getGoalIdFromJob(completedJob);
+        if (!goalId) {
+          throw new Error("计划已生成，但任务结果里没有返回 goal_id。");
         }
 
-        setPlanJob({
-          ...createLocalPlanJob(100),
-          status: "success",
-          result_json: { stage: "done", goal_id: createdGoal.id }
-        });
+        createdGoal = await api.getGoal(goalId);
       }
 
       setGoal(createdGoal);
@@ -682,19 +730,26 @@ export default function Home() {
     setReaderError(null);
   }
 
-  async function handleTranslatePdfPage() {
-    if (!readerMaterialId || !pdfText?.readable) {
+  async function handleTranslatePdfPage(mode: "text" | "ocr" = "text") {
+    if (!readerMaterialId || (mode === "text" && !pdfText?.readable)) {
       return;
     }
-    setReaderLoading("translate");
+    setReaderLoading(mode === "ocr" ? "ocr-translate" : "translate");
     setReaderError(null);
     try {
-      const translated = await api.translatePdfPage(readerMaterialId, pdfPage);
+      const translated = await api.translatePdfPage(
+        readerMaterialId,
+        pdfPage,
+        "zh-CN",
+        mode
+      );
       setPdfTranslation(translated);
     } catch (err) {
       setReaderError(err instanceof Error ? err.message : "当前页翻译失败");
     } finally {
-      setReaderLoading((current) => (current === "translate" ? null : current));
+      setReaderLoading((current) =>
+        current === "translate" || current === "ocr-translate" ? null : current
+      );
     }
   }
 
@@ -721,6 +776,62 @@ export default function Home() {
     } finally {
       event.target.value = "";
       setReaderLoading((current) => (current === "upload" ? null : current));
+    }
+  }
+
+  async function handleReaderPdfOcr(materialId: number) {
+    if (!goal) {
+      return;
+    }
+    setReaderLoading(`ocr-${materialId}`);
+    setReaderError(null);
+    try {
+      await api.ocrMaterial(materialId);
+      const nextMaterials = await api.listMaterials(goal.id);
+      setMaterials(nextMaterials);
+      if (materialId === readerMaterialId) {
+        const meta = await api.getPdfMeta(materialId);
+        setPdfMeta(meta);
+        setPdfText(await api.getPdfPageText(materialId, pdfPage));
+        setPdfTranslation(null);
+      }
+      await loadGoalSummaries(false);
+    } catch (err) {
+      setReaderError(err instanceof Error ? err.message : "OCR 识别失败");
+    } finally {
+      setReaderLoading((current) =>
+        current === `ocr-${materialId}` ? null : current
+      );
+    }
+  }
+
+  async function handleDeleteMaterial(materialId: number) {
+    if (!goal || !window.confirm("删除该资料及其 OCR 缓存和知识库片段？")) {
+      return;
+    }
+    setReaderLoading(`delete-${materialId}`);
+    setReaderError(null);
+    try {
+      await api.deleteMaterial(materialId);
+      const nextMaterials = await api.listMaterials(goal.id);
+      setMaterials(nextMaterials);
+      if (materialId === readerMaterialId) {
+        const nextPdf = nextMaterials.find(
+          (item) => item.file_type.toLowerCase() === "pdf"
+        );
+        setReaderMaterialId(nextPdf?.id ?? null);
+        setPdfPage(1);
+        setPdfMeta(null);
+        setPdfText(null);
+        setPdfTranslation(null);
+      }
+      await loadGoalSummaries(false);
+    } catch (err) {
+      setReaderError(err instanceof Error ? err.message : "资料删除失败");
+    } finally {
+      setReaderLoading((current) =>
+        current === `delete-${materialId}` ? null : current
+      );
     }
   }
 
@@ -1050,9 +1161,12 @@ export default function Home() {
                     </Badge>
                   </div>
                   <Progress value={planProgress} />
-                  <p className="text-xs text-muted-foreground">
-                    当前进度 {planProgress}%
-                  </p>
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>当前进度 {planProgress}%</p>
+                    {getPlanJobDetails(planJob).map((item) => (
+                      <p key={item}>{item}</p>
+                    ))}
+                  </div>
                 </div>
               ) : null}
             </CardContent>
@@ -1274,7 +1388,11 @@ export default function Home() {
                   </div>
                   <div className="rounded-md border bg-background p-3">
                     <p className="text-lg font-semibold">
-                      {materials.filter((item) => item.parse_status === "ready").length}
+                      {
+                        materials.filter((item) =>
+                          ["ready", "ocr_ready"].includes(item.parse_status)
+                        ).length
+                      }
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">ready</p>
                   </div>
@@ -1305,6 +1423,8 @@ export default function Home() {
           zoom={pdfZoom}
           onMaterialChange={handleReaderMaterialChange}
           onPageChange={setPdfPage}
+          onDelete={handleDeleteMaterial}
+          onOcr={handleReaderPdfOcr}
           onUpload={handleReaderPdfUpload}
           onTranslate={handleTranslatePdfPage}
           onZoomChange={setPdfZoom}
@@ -1350,6 +1470,8 @@ function PdfReaderView({
   zoom,
   onMaterialChange,
   onPageChange,
+  onDelete,
+  onOcr,
   onUpload,
   onTranslate,
   onZoomChange
@@ -1365,8 +1487,10 @@ function PdfReaderView({
   zoom: number;
   onMaterialChange: (materialId: number) => void;
   onPageChange: (page: number) => void;
+  onDelete: (materialId: number) => Promise<void>;
+  onOcr: (materialId: number) => Promise<void>;
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
-  onTranslate: () => Promise<void>;
+  onTranslate: (mode?: "text" | "ocr") => Promise<void>;
   onZoomChange: (zoom: number) => void;
 }) {
   const selectedMaterial = materials.find((item) => item.id === selectedMaterialId) ?? null;
@@ -1396,9 +1520,9 @@ function PdfReaderView({
     setReaderPanel((current) => (current === panel ? null : panel));
   }
 
-  async function translateAndOpenPanel() {
+  async function translateAndOpenPanel(mode: "text" | "ocr" = "text") {
     setReaderPanel("translation");
-    await onTranslate();
+    await onTranslate(mode);
   }
 
   return (
@@ -1459,6 +1583,24 @@ function PdfReaderView({
               >
                 下一页
                 <ChevronRight className="h-4 w-4" aria-hidden="true" />
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={
+                  !selectedMaterial ||
+                  selectedMaterial.parse_status === "ocr_ready" ||
+                  loading === `ocr-${selectedMaterial.id}`
+                }
+                onClick={() => selectedMaterial && void onOcr(selectedMaterial.id)}
+                title="OCR 识别整份 PDF"
+              >
+                {selectedMaterial && loading === `ocr-${selectedMaterial.id}` ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Languages className="h-4 w-4" aria-hidden="true" />
+                )}
+                OCR 识别整份 PDF
               </Button>
             </div>
           </div>
@@ -1583,7 +1725,7 @@ function PdfReaderView({
                           onChange={onUpload}
                         />
                         <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                          只保存为阅读资料，不进行 RAG 建库。
+                          只保存 PDF，不自动 OCR；需要时点击“OCR 识别整份 PDF”。
                         </p>
                         {loading === "upload" ? (
                           <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
@@ -1600,33 +1742,77 @@ function PdfReaderView({
                           {materials.map((material) => {
                             const active = material.id === selectedMaterialId;
                             return (
-                              <button
+                              <div
                                 className={cn(
-                                  "w-full rounded-md border bg-background p-3 text-left transition-colors hover:bg-muted",
+                                  "rounded-md border bg-background p-3 transition-colors",
                                   active && "border-primary bg-teal-50"
                                 )}
                                 key={material.id}
-                                type="button"
-                                onClick={() => onMaterialChange(material.id)}
                               >
-                                <div className="flex items-start justify-between gap-2">
-                                  <span className="line-clamp-2 text-sm font-semibold">
-                                    {material.filename}
-                                  </span>
-                                  <Badge
-                                    tone={
-                                      material.parse_status === "ready"
-                                        ? "teal"
-                                        : "amber"
+                                <button
+                                  className="w-full text-left"
+                                  type="button"
+                                  onClick={() => onMaterialChange(material.id)}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <span className="line-clamp-2 text-sm font-semibold">
+                                      {material.filename}
+                                    </span>
+                                    <Badge
+                                      tone={
+                                        ["ready", "ocr_ready"].includes(material.parse_status)
+                                          ? "teal"
+                                          : "amber"
+                                      }
+                                    >
+                                      {material.parse_status}
+                                    </Badge>
+                                  </div>
+                                  <p className="mt-2 text-xs text-muted-foreground">
+                                    {material.parse_status === "ocr_ready"
+                                      ? `${material.chunk_count} OCR pages · PDF`
+                                      : `${material.chunk_count} chunks · PDF`}
+                                  </p>
+                                </button>
+                                <div className="mt-3 flex items-center justify-between gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={
+                                      material.parse_status === "ocr_ready" ||
+                                      loading === `ocr-${material.id}` ||
+                                      loading === `delete-${material.id}`
                                     }
+                                    onClick={() => void onOcr(material.id)}
                                   >
-                                    {material.parse_status}
-                                  </Badge>
+                                    {loading === `ocr-${material.id}` ? (
+                                      <Loader2
+                                        className="h-4 w-4 animate-spin"
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <Languages className="h-4 w-4" aria-hidden="true" />
+                                    )}
+                                    OCR 识别
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    disabled={loading === `delete-${material.id}`}
+                                    title="删除资料"
+                                    onClick={() => void onDelete(material.id)}
+                                  >
+                                    {loading === `delete-${material.id}` ? (
+                                      <Loader2
+                                        className="h-4 w-4 animate-spin"
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                                    )}
+                                  </Button>
                                 </div>
-                                <p className="mt-2 text-xs text-muted-foreground">
-                                  {material.chunk_count} chunks · PDF
-                                </p>
-                              </button>
+                              </div>
                             );
                           })}
                         </div>
@@ -1644,16 +1830,29 @@ function PdfReaderView({
                       </p>
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                      {!readable ? (
-                        <div className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
-                          当前页没有可提取文本，可能是扫描版或图片型 PDF。第一版暂不处理 OCR。
-                        </div>
-                      ) : translation ? (
+                      {translation ? (
                         <div className="space-y-3">
-                          <Badge tone={translation.cached ? "neutral" : "teal"}>
-                            {translation.cached ? "缓存翻译" : "新翻译"}
-                          </Badge>
+                          <div className="flex flex-wrap gap-2">
+                            <Badge tone={translation.cached ? "neutral" : "teal"}>
+                              {translation.cached ? "缓存翻译" : "新翻译"}
+                            </Badge>
+                            <Badge
+                              tone={
+                                translation.extraction_mode === "ocr"
+                                  ? "amber"
+                                  : "teal"
+                              }
+                            >
+                              {translation.extraction_mode === "ocr"
+                                ? "OCR 文本"
+                                : "文本提取"}
+                            </Badge>
+                          </div>
                           <ReaderMarkdown content={translation.translated_text} />
+                        </div>
+                      ) : !readable ? (
+                        <div className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+                          当前页没有可提取文本，可能是扫描版或图片型 PDF。可以点击“OCR 翻译”先调用 PaddleOCR，再基于 OCR Markdown 翻译。
                         </div>
                       ) : (
                         <div className="space-y-4">
@@ -1692,7 +1891,7 @@ function ReaderMarkdown({
   return (
     <div className={cn("chat-markdown text-sm leading-7", className)}>
       <ReactMarkdown
-        remarkPlugins={[remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
           code: ({ className, children, ...props }) => {
@@ -1735,9 +1934,48 @@ function ReaderMarkdown({
 }
 
 function normalizeReaderMarkdown(content: string) {
-  return content
+  return normalizeAccidentalIndentedMarkdown(normalizeCompactMarkdownTables(content))
     .replace(/\\\[((?:.|\n)*?)\\\]/g, (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`)
     .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
+}
+
+function normalizeCompactMarkdownTables(content: string) {
+  return content
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      const pipeCount = (trimmed.match(/\|/g) ?? []).length;
+      const looksLikeCompactTable =
+        trimmed.startsWith("|") && pipeCount >= 8 && /\|\s*:?-{3,}:?\s*\|/.test(trimmed);
+
+      if (!looksLikeCompactTable) {
+        return line;
+      }
+
+      return line.replace(/\|\s+\|/g, "|\n|");
+    })
+    .join("\n");
+}
+
+function normalizeAccidentalIndentedMarkdown(content: string) {
+  let insideFence = false;
+
+  return content
+    .split("\n")
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence) {
+        return line;
+      }
+
+      const looksLikeMarkdownText =
+        /^\s{4,}(#{1,6}\s|\*\*|[-*+]\s|\d+\.\s|>\s|\|)/.test(line);
+      return looksLikeMarkdownText ? line.trimStart() : line;
+    })
+    .join("\n");
 }
 
 function EmptyState({ text }: { text: string }) {

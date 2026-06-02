@@ -12,11 +12,13 @@ import {
   Send,
   Settings,
   SlidersHorizontal,
+  Trash2,
   Upload,
   X
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { api } from "@/lib/api";
 import type {
@@ -37,6 +39,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  createChatSession,
+  deleteChatSession,
+  getActiveChatSessionId,
+  getChatMessages,
+  listChatSessions,
+  saveChatMessages,
+  setActiveChatSessionId,
+  updateChatSession
+} from "@/lib/chat-sessions";
+import type { ChatSession, ChatSessionContext } from "@/lib/chat-sessions";
 import { cn } from "@/lib/utils";
 
 export type DrawerPanel = "chat" | "knowledge" | "review" | "settings";
@@ -115,6 +128,11 @@ export function ChatDrawer({
 }: ChatDrawerProps) {
   const [activePanel, setActivePanel] = useState<DrawerPanel | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [chatSessionsReady, setChatSessionsReady] = useState(false);
+  const [activeSessionLoaded, setActiveSessionLoaded] = useState(false);
+  const [chatSessionError, setChatSessionError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [knowledgeGoalId, setKnowledgeGoalId] = useState<number | null>(
@@ -134,6 +152,7 @@ export function ChatDrawer({
   const [searchingKnowledge, setSearchingKnowledge] = useState(false);
   const [uploadingKnowledge, setUploadingKnowledge] = useState(false);
   const [insertingKnowledge, setInsertingKnowledge] = useState(false);
+  const [deletingKnowledgeMaterialId, setDeletingKnowledgeMaterialId] = useState<number | null>(null);
   const [loadingKnowledge, setLoadingKnowledge] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -168,6 +187,10 @@ export function ChatDrawer({
     }, 0);
     return Math.round((score / selectedTasks.length) * 100);
   }, [selectedTasks]);
+  const chatContext = useMemo(
+    () => buildChatSessionContext(goal, selectedPlan, readingContext),
+    [goal, readingContext, selectedPlan]
+  );
 
   useEffect(() => {
     if (!requestedPanel) {
@@ -176,6 +199,55 @@ export function ChatDrawer({
     setActivePanel(requestedPanel);
     onRequestedPanelHandled?.();
   }, [onRequestedPanelHandled, requestedPanel]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadInitialChatSession() {
+      try {
+        const sessions = listChatSessions();
+        const storedActiveId = getActiveChatSessionId();
+        const activeSession =
+          sessions.find((session) => session.id === storedActiveId) ?? sessions[0];
+        const session = activeSession ?? createChatSession(chatContext);
+        const storedMessages = await getChatMessages(session.id);
+
+        if (cancelled) {
+          return;
+        }
+        setChatSessions(listChatSessions());
+        setActiveSessionId(session.id);
+        setMessages(storedMessages.length > 0 ? storedMessages : initialMessages);
+        setActiveSessionLoaded(true);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setChatSessionError(`会话记录读取失败：${errorMessage(error)}`);
+        setMessages(initialMessages);
+        setActiveSessionLoaded(true);
+      } finally {
+        if (!cancelled) {
+          setChatSessionsReady(true);
+        }
+      }
+    }
+
+    void loadInitialChatSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatSessionsReady || !activeSessionLoaded || !activeSessionId) {
+      return;
+    }
+
+    void saveChatMessages(activeSessionId, messages).catch((error) => {
+      setChatSessionError(`会话记录保存失败：${errorMessage(error)}`);
+    });
+  }, [activeSessionId, activeSessionLoaded, chatSessionsReady, messages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -364,6 +436,88 @@ export function ChatDrawer({
     setActivePanel((current) => (current === panel ? null : panel));
   }
 
+  function refreshChatSessions() {
+    setChatSessions(listChatSessions());
+  }
+
+  function ensureActiveChatSessionForMessage(content: string) {
+    let sessionId = activeSessionId;
+    if (!sessionId) {
+      const session = createChatSession(chatContext, sessionTitleFromMessage(content));
+      sessionId = session.id;
+      setActiveSessionId(session.id);
+      setActiveSessionLoaded(true);
+    } else {
+      const currentSession = chatSessions.find((session) => session.id === sessionId);
+      updateChatSession(sessionId, {
+        context: chatContext,
+        title:
+          !currentSession?.title || currentSession.title === "新会话"
+            ? sessionTitleFromMessage(content)
+            : currentSession.title
+      });
+    }
+    setActiveChatSessionId(sessionId);
+    refreshChatSessions();
+  }
+
+  async function createNewChatSession() {
+    try {
+      const session = createChatSession(chatContext);
+      setActiveSessionLoaded(false);
+      setActiveSessionId(session.id);
+      setMessages(initialMessages);
+      await saveChatMessages(session.id, initialMessages);
+      setActiveSessionLoaded(true);
+      setChatSessionError(null);
+      refreshChatSessions();
+    } catch (error) {
+      setChatSessionError(`新建会话失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function selectChatSession(sessionId: string) {
+    if (!sessionId || sessionId === activeSessionId) {
+      return;
+    }
+    setActiveSessionLoaded(false);
+    setActiveSessionId(sessionId);
+    setActiveChatSessionId(sessionId);
+    try {
+      const storedMessages = await getChatMessages(sessionId);
+      setMessages(storedMessages.length > 0 ? storedMessages : initialMessages);
+      setChatSessionError(null);
+    } catch (error) {
+      setMessages(initialMessages);
+      setChatSessionError(`会话切换失败：${errorMessage(error)}`);
+    } finally {
+      setActiveSessionLoaded(true);
+      refreshChatSessions();
+    }
+  }
+
+  async function removeActiveChatSession() {
+    if (!activeSessionId || streaming) {
+      return;
+    }
+
+    try {
+      await deleteChatSession(activeSessionId);
+      const remainingSessions = listChatSessions();
+      const nextSession = remainingSessions[0] ?? createChatSession(chatContext);
+      const storedMessages = await getChatMessages(nextSession.id);
+      setActiveSessionLoaded(false);
+      setActiveSessionId(nextSession.id);
+      setActiveChatSessionId(nextSession.id);
+      setMessages(storedMessages.length > 0 ? storedMessages : initialMessages);
+      setActiveSessionLoaded(true);
+      setChatSessionError(null);
+      refreshChatSessions();
+    } catch (error) {
+      setChatSessionError(`删除会话失败：${errorMessage(error)}`);
+    }
+  }
+
   function updateAppSettings(patch: Partial<AppSettings>) {
     setAppSettings((current) => ({
       ...current,
@@ -437,6 +591,26 @@ export function ChatDrawer({
     }
   }
 
+  async function deleteKnowledgeMaterial(materialId: number) {
+    if (!knowledgeGoalId || !window.confirm("删除该素材及其 OCR 缓存和知识库片段？")) {
+      return;
+    }
+    setDeletingKnowledgeMaterialId(materialId);
+    setKnowledgeError(null);
+    try {
+      await api.deleteMaterial(materialId);
+      setSelectedMaterialId((current) => (current === materialId ? null : current));
+      setKnowledgeHits([]);
+      await refreshKnowledgeMaterials(knowledgeGoalId);
+    } catch (error) {
+      setKnowledgeError(`素材删除失败：${errorMessage(error)}`);
+    } finally {
+      setDeletingKnowledgeMaterialId((current) =>
+        current === materialId ? null : current
+      );
+    }
+  }
+
   async function sendMessage() {
     const content = input.trim();
     if (!content || streaming) {
@@ -446,6 +620,8 @@ export function ChatDrawer({
     const mayMutateWorkspace = /复盘|调整|加入知识库|写入知识库|补充到知识库|记到知识库/.test(
       content
     );
+    ensureActiveChatSessionForMessage(content);
+
     const nextMessages: ChatMessage[] = [
       ...messages,
       { role: "user", content },
@@ -680,6 +856,7 @@ export function ChatDrawer({
             materials={knowledgeMaterials}
             onGoalChange={handleKnowledgeGoalChange}
             onInsert={() => void insertKnowledgeSnippet()}
+            onDeleteMaterial={(materialId) => void deleteKnowledgeMaterial(materialId)}
             onManualContentChange={setManualContent}
             onManualSourceNameChange={setManualSourceName}
             onMaterialChange={setSelectedMaterialId}
@@ -691,6 +868,7 @@ export function ChatDrawer({
             query={knowledgeQuery}
             searching={searchingKnowledge}
             selectedMaterialId={selectedMaterialId}
+            deletingMaterialId={deletingKnowledgeMaterialId}
             uploading={uploadingKnowledge}
           />
         ) : activePanel === "settings" ? (
@@ -717,11 +895,17 @@ export function ChatDrawer({
           />
         ) : (
           <ChatPanel
+            activeSessionId={activeSessionId}
+            chatSessionError={chatSessionError}
+            chatSessions={chatSessions}
             input={input}
             messages={messages}
+            onCreateSession={() => void createNewChatSession()}
+            onDeleteSession={() => void removeActiveChatSession()}
             onInputChange={setInput}
             onKeyDown={handleKeyDown}
             onSend={() => void sendMessage()}
+            onSelectSession={(sessionId) => void selectChatSession(sessionId)}
             renderMessage={renderMessage}
             scrollAreaRef={scrollAreaRef}
             streaming={streaming}
@@ -925,26 +1109,82 @@ function SettingsPanel({
 }
 
 function ChatPanel({
+  activeSessionId,
+  chatSessionError,
+  chatSessions,
   input,
   messages,
+  onCreateSession,
+  onDeleteSession,
   onInputChange,
   onKeyDown,
   onSend,
+  onSelectSession,
   renderMessage,
   scrollAreaRef,
   streaming
 }: {
+  activeSessionId: string | null;
+  chatSessionError: string | null;
+  chatSessions: ChatSession[];
   input: string;
   messages: ChatMessage[];
+  onCreateSession: () => void;
+  onDeleteSession: () => void;
   onInputChange: (value: string) => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   onSend: () => void;
+  onSelectSession: (sessionId: string) => void;
   renderMessage: (message: ChatMessage) => React.ReactNode;
   scrollAreaRef: React.RefObject<HTMLDivElement | null>;
   streaming: boolean;
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b p-3">
+        <div className="flex items-center gap-2">
+          <select
+            className="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={activeSessionId ?? ""}
+            onChange={(event) => onSelectSession(event.target.value)}
+            disabled={streaming}
+            title="切换会话"
+          >
+            {chatSessions.length > 0 ? (
+              chatSessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.title} · {sessionContextLabel(session)}
+                </option>
+              ))
+            ) : (
+              <option value="">新会话</option>
+            )}
+          </select>
+          <Button
+            size="icon"
+            variant="outline"
+            onClick={onCreateSession}
+            disabled={streaming}
+            title="新建会话"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+          </Button>
+          <Button
+            size="icon"
+            variant="outline"
+            onClick={onDeleteSession}
+            disabled={!activeSessionId || streaming}
+            title="删除当前会话"
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+          </Button>
+        </div>
+        {chatSessionError ? (
+          <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+            {chatSessionError}
+          </p>
+        ) : null}
+      </div>
       <div
         className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4"
         ref={scrollAreaRef}
@@ -1006,12 +1246,14 @@ function KnowledgePanel({
   goals,
   hits,
   inserting,
+  deletingMaterialId,
   loading,
   manualContent,
   manualSourceName,
   materials,
   onGoalChange,
   onInsert,
+  onDeleteMaterial,
   onManualContentChange,
   onManualSourceNameChange,
   onMaterialChange,
@@ -1031,12 +1273,14 @@ function KnowledgePanel({
   goals: Array<{ id: number; title: string }>;
   hits: KnowledgeSearchHit[];
   inserting: boolean;
+  deletingMaterialId: number | null;
   loading: boolean;
   manualContent: string;
   manualSourceName: string;
   materials: CourseMaterial[];
   onGoalChange: (goalId: number | null) => void;
   onInsert: () => void;
+  onDeleteMaterial: (materialId: number) => void;
   onManualContentChange: (value: string) => void;
   onManualSourceNameChange: (value: string) => void;
   onMaterialChange: (materialId: number | null) => void;
@@ -1200,7 +1444,12 @@ function KnowledgePanel({
         <div className="mb-4 grid gap-2 md:grid-cols-2">
           {materials.length > 0 ? (
             materials.slice(0, 6).map((material) => (
-              <MaterialCard material={material} key={material.id} />
+              <MaterialCard
+                deleting={deletingMaterialId === material.id}
+                material={material}
+                key={material.id}
+                onDelete={onDeleteMaterial}
+              />
             ))
           ) : (
             <div className="rounded-md border border-dashed bg-background px-4 py-6 text-center text-sm text-muted-foreground md:col-span-2">
@@ -1435,25 +1684,50 @@ function panelDescription(panel: DrawerPanel | null, selectedPlan: StudyPlan | n
     : "当前上下文：通用问答";
 }
 
-function MaterialCard({ material }: { material: CourseMaterial }) {
+function MaterialCard({
+  deleting,
+  material,
+  onDelete
+}: {
+  deleting: boolean;
+  material: CourseMaterial;
+  onDelete: (materialId: number) => void;
+}) {
   return (
     <div className="rounded-md border bg-background p-3 text-sm">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-start justify-between gap-2">
         <span className="line-clamp-2 font-medium">{material.filename}</span>
-        <Badge
-          tone={
-            material.parse_status === "ready"
-              ? "teal"
-              : material.parse_status === "failed"
-                ? "rose"
-                : "amber"
-          }
-        >
-          {material.parse_status}
-        </Badge>
+        <div className="flex shrink-0 items-center gap-1">
+          <Badge
+            tone={
+              ["ready", "ocr_ready"].includes(material.parse_status)
+                ? "teal"
+                : material.parse_status === "failed"
+                  ? "rose"
+                  : "amber"
+            }
+          >
+            {material.parse_status}
+          </Badge>
+          <Button
+            size="icon"
+            variant="ghost"
+            disabled={deleting}
+            title="删除素材"
+            onClick={() => onDelete(material.id)}
+          >
+            {deleting ? (
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+            )}
+          </Button>
+        </div>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        {material.chunk_count} chunks · {material.file_type}
+        {material.parse_status === "ocr_ready"
+          ? `${material.chunk_count} OCR pages · ${material.file_type}`
+          : `${material.chunk_count} chunks · ${material.file_type}`}
       </p>
       {material.error_message ? (
         <p className="mt-2 text-xs text-rose-700">{material.error_message}</p>
@@ -1519,6 +1793,56 @@ function metadataTerms(hit: KnowledgeSearchHit) {
     })
     .filter(Boolean)
     .slice(0, 5);
+}
+
+function buildChatSessionContext(
+  goal: GoalDetail | null,
+  selectedPlan: StudyPlan | null,
+  readingContext: ReadingContext | null | undefined
+): ChatSessionContext {
+  if (readingContext?.material_id) {
+    return {
+      type: "pdf",
+      goalId: goal?.id,
+      planId: selectedPlan?.id,
+      materialId: readingContext.material_id,
+      pageIndex: readingContext.page_index
+    };
+  }
+  if (selectedPlan) {
+    return {
+      type: "plan",
+      goalId: goal?.id,
+      planId: selectedPlan.id
+    };
+  }
+  if (goal) {
+    return {
+      type: "goal",
+      goalId: goal.id
+    };
+  }
+  return { type: "general" };
+}
+
+function sessionTitleFromMessage(content: string) {
+  const compact = content.replace(/\s+/g, " ").trim();
+  return compact.length > 20 ? `${compact.slice(0, 20)}...` : compact || "新会话";
+}
+
+function sessionContextLabel(session: ChatSession) {
+  if (session.context.type === "pdf") {
+    return typeof session.context.pageIndex === "number"
+      ? `PDF 第 ${session.context.pageIndex + 1} 页`
+      : "PDF";
+  }
+  if (session.context.type === "plan") {
+    return session.context.planId ? `计划 #${session.context.planId}` : "计划";
+  }
+  if (session.context.type === "goal") {
+    return session.context.goalId ? `目标 #${session.context.goalId}` : "目标";
+  }
+  return "通用";
 }
 
 function settingsForLocalStorage(settings: AppSettings): AppSettings {
@@ -1629,7 +1953,7 @@ function MarkdownMessage({ content }: { content: string }) {
   return (
     <div className="chat-markdown">
       <ReactMarkdown
-        remarkPlugins={[remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => <p>{children}</p>,
@@ -1673,10 +1997,49 @@ function MarkdownMessage({ content }: { content: string }) {
 }
 
 function normalizeMathMarkdown(content: string) {
-  return content
+  return normalizeAccidentalIndentedMarkdown(normalizeCompactMarkdownTables(content))
     .replace(
       /\\\[((?:.|\n)*?)\\\]/g,
       (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`
     )
     .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
+}
+
+function normalizeCompactMarkdownTables(content: string) {
+  return content
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      const pipeCount = (trimmed.match(/\|/g) ?? []).length;
+      const looksLikeCompactTable =
+        trimmed.startsWith("|") && pipeCount >= 8 && /\|\s*:?-{3,}:?\s*\|/.test(trimmed);
+
+      if (!looksLikeCompactTable) {
+        return line;
+      }
+
+      return line.replace(/\|\s+\|/g, "|\n|");
+    })
+    .join("\n");
+}
+
+function normalizeAccidentalIndentedMarkdown(content: string) {
+  let insideFence = false;
+
+  return content
+    .split("\n")
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence) {
+        return line;
+      }
+
+      const looksLikeMarkdownText =
+        /^\s{4,}(#{1,6}\s|\*\*|[-*+]\s|\d+\.\s|>\s|\|)/.test(line);
+      return looksLikeMarkdownText ? line.trimStart() : line;
+    })
+    .join("\n");
 }

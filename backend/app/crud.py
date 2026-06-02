@@ -470,6 +470,13 @@ def list_materials(db: Session, goal_id: int) -> list[models.CourseMaterial]:
     return list(db.scalars(stmt).all())
 
 
+def delete_material(db: Session, material: models.CourseMaterial) -> None:
+    """删除单个素材及其关系型数据库中的 chunks/translations。"""
+
+    db.delete(material)
+    db.commit()
+
+
 def mark_material_processing(db: Session, material: models.CourseMaterial) -> None:
     """把资料状态标记为解析/建库中。"""
 
@@ -496,6 +503,19 @@ def mark_material_uploaded(db: Session, material: models.CourseMaterial) -> mode
     material.parse_status = "uploaded"
     material.error_message = None
     material.chunk_count = 0
+    db.commit()
+    db.refresh(material)
+    return material
+
+
+def mark_material_ocr_ready(
+    db: Session, material: models.CourseMaterial, page_count: int
+) -> models.CourseMaterial:
+    """标记阅读器资料已完成 OCR，但没有写入 Chroma 知识库。"""
+
+    material.parse_status = "ocr_ready"
+    material.error_message = None
+    material.chunk_count = page_count
     db.commit()
     db.refresh(material)
     return material

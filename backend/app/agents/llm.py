@@ -35,6 +35,11 @@ class DeepSeekClient:
             "configured": configured,
             "provider": "deepseek",
             "model": self.settings.deepseek_model,
+            "ocr_provider": self.settings.ocr_provider,
+            "ocr_enabled": self.settings.ocr_provider.strip().lower() == "paddleocr"
+            and bool(self.settings.paddle_ocr_token.strip()),
+            "ocr_model": self.settings.paddle_ocr_model,
+            "ocr_endpoint": self.settings.paddle_ocr_job_url,
             "ok": False,
             "reply": None,
             "error": None,

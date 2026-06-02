@@ -1,5 +1,4 @@
 from functools import lru_cache
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,8 +13,15 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./studyagent.db"
     redis_url: str = "redis://localhost:6379/0"
     deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
+    ocr_provider: str = "none"
+    paddle_ocr_token: str = ""
+    paddle_ocr_job_url: str = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+    paddle_ocr_model: str = "PaddleOCR-VL-1.6"
+    ocr_storage_dir: str = "./storage/ocr"
+    ocr_poll_interval_seconds: float = 5.0
+    ocr_poll_timeout_seconds: int = 600
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     material_upload_dir: str = "./storage/materials"
     chroma_persist_dir: str = "./storage/chroma"
@@ -23,6 +29,7 @@ class Settings(BaseSettings):
     chunk_overlap: int = 120
     rag_enrich_max_chunks: int = 12
 
+    # 本地启动脚本会先切到 backend/，因此这里使用相对路径读取 backend/.env。
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

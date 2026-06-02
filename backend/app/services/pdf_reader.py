@@ -6,6 +6,7 @@ from pathlib import Path
 import fitz
 
 from app import models
+from app.services.paddle_ocr import cached_ocr_page_text, cached_ocr_pages
 
 
 def ensure_pdf_material(material: models.CourseMaterial) -> Path:
@@ -23,16 +24,16 @@ def pdf_meta(material: models.CourseMaterial) -> dict:
     """读取 PDF 页数，并统计哪些页面可提取文本。"""
 
     path = ensure_pdf_material(material)
-    readable_pages: list[int] = []
+    readable_pages = {page.page_index for page in cached_ocr_pages(material)}
     with fitz.open(path) as document:
         for page_index, page in enumerate(document, start=1):
             if page.get_text("text").strip():
-                readable_pages.append(page_index)
+                readable_pages.add(page_index)
         return {
             "material_id": material.id,
             "filename": material.filename,
             "page_count": document.page_count,
-            "readable_pages": readable_pages,
+            "readable_pages": sorted(readable_pages),
         }
 
 
@@ -42,7 +43,8 @@ def pdf_page_text(material: models.CourseMaterial, page_index: int) -> dict:
     path = ensure_pdf_material(material)
     with fitz.open(path) as document:
         page = _load_page(document, page_index)
-        text = page.get_text("text").strip()
+        # OCR Markdown 通常比 PDF 内置文本更能保留公式、表格和版面结构。
+        text = cached_ocr_page_text(material, page_index) or page.get_text("text").strip()
         return {
             "material_id": material.id,
             "filename": material.filename,
@@ -62,6 +64,12 @@ def render_pdf_page_png(material: models.CourseMaterial, page_index: int, zoom: 
         page = _load_page(document, page_index)
         pixmap = page.get_pixmap(matrix=fitz.Matrix(safe_zoom, safe_zoom), alpha=False)
         return pixmap.tobytes("png")
+
+
+def hash_bytes(content: bytes) -> str:
+    """为渲染后的页面图片生成稳定 hash，用于视觉 OCR 翻译缓存。"""
+
+    return hashlib.sha256(content).hexdigest()
 
 
 def hash_text(text: str) -> str:

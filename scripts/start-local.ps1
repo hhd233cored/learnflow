@@ -2,7 +2,8 @@
 param(
     [int]$BackendPort = 8000,
     [int]$FrontendPort = 3000,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$SkipPortCleanup
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,13 +26,66 @@ function Write-Step {
 function Test-PortInUse {
     param([int]$Port)
 
+    return (Get-ListeningPortPids -Port $Port).Count -gt 0
+}
+
+function Get-ListeningPortPids {
+    param([int]$Port)
+
+    $processIds = @()
+    $pattern = ":$Port\s+.*LISTENING\s+(\d+)"
     try {
-        $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-        return $null -ne $connections
+        $netstatOutput = & netstat.exe -ano
     }
     catch {
-        # 某些精简环境可能没有 Get-NetTCPConnection；端口检查失败不影响启动。
-        return $false
+        return @()
+    }
+
+    foreach ($line in $netstatOutput) {
+        $match = [regex]::Match($line, $pattern)
+        if ($match.Success) {
+            $processIds += [int]$match.Groups[1].Value
+        }
+    }
+
+    $uniqueProcessIds = @()
+    foreach ($item in $processIds) {
+        $id = [int]$item
+        if ($id -gt 0 -and $uniqueProcessIds -notcontains $id) {
+            $uniqueProcessIds += $id
+        }
+    }
+    return $uniqueProcessIds
+}
+
+function Stop-PortListeners {
+    param(
+        [int]$Port,
+        [string]$Label
+    )
+
+    $listenerProcessIds = Get-ListeningPortPids -Port $Port
+    if ($listenerProcessIds.Count -eq 0) {
+        Write-Host "$Label port $Port is free."
+        return
+    }
+
+    Write-Warning "$Label port $Port is already in use. Stopping old listener process(es): $($listenerProcessIds -join ', ')"
+    foreach ($processId in $listenerProcessIds) {
+        try {
+            Stop-Process -Id $processId -Force -ErrorAction Stop
+            Write-Host "Stopped PID $processId on port $Port."
+        }
+        catch {
+            # 有时 Uvicorn reloader 子进程需要 taskkill 才能干净退出。
+            & taskkill.exe /PID $processId /F | Out-Host
+        }
+    }
+
+    Start-Sleep -Seconds 1
+    $remaining = Get-ListeningPortPids -Port $Port
+    if ($remaining.Count -gt 0) {
+        throw "$Label port $Port is still occupied by PID(s): $($remaining -join ', '). Close them manually or rerun as Administrator."
     }
 }
 
@@ -43,13 +97,9 @@ function Start-DevWindow {
         [string]$ExtraArgs
     )
 
-    # 使用 EncodedCommand 避免 Windows PowerShell 5.1 在路径、引号、空格上误解析启动命令。
-    $command = "& '$ScriptPath' $ExtraArgs"
-    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    $processArgs = "-NoExit -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
-
-    if ([string]::IsNullOrWhiteSpace($processArgs)) {
-        throw "PowerShell startup arguments are empty for $Title."
+    $processArgs = @("-NoExit", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath)
+    if (-not [string]::IsNullOrWhiteSpace($ExtraArgs)) {
+        $processArgs += $ExtraArgs.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries)
     }
 
     Start-Process `
@@ -67,12 +117,19 @@ if (-not (Test-Path -LiteralPath $FrontendNodeModules)) {
     throw "Frontend node_modules not found: $FrontendNodeModules. Run .\install-local.bat first."
 }
 
-if (Test-PortInUse -Port $BackendPort) {
-    Write-Warning "Port $BackendPort is already in use. The backend window may fail to start. Use -BackendPort to choose another port."
+if (-not $SkipPortCleanup) {
+    Write-Step "Clean old local dev processes"
+    Stop-PortListeners -Port $BackendPort -Label "Backend"
+    Stop-PortListeners -Port $FrontendPort -Label "Frontend"
 }
+else {
+    if (Test-PortInUse -Port $BackendPort) {
+        Write-Warning "Port $BackendPort is already in use. The backend window may fail to start. Use -BackendPort to choose another port."
+    }
 
-if (Test-PortInUse -Port $FrontendPort) {
-    Write-Warning "Port $FrontendPort is already in use. The frontend window may fail to start. Use -FrontendPort to choose another port."
+    if (Test-PortInUse -Port $FrontendPort) {
+        Write-Warning "Port $FrontendPort is already in use. The frontend window may fail to start. Use -FrontendPort to choose another port."
+    }
 }
 
 Write-Step "Start backend FastAPI"

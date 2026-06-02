@@ -134,6 +134,7 @@ export type PdfPageTranslation = {
   target_lang: string;
   text_hash: string;
   translated_text: string;
+  extraction_mode: "text" | "ocr";
   cached: boolean;
 };
 
@@ -246,6 +247,32 @@ export const api = {
         throw new Error((await response.text()) || "Create goal failed");
       }
       return response.json() as Promise<GoalDetail>;
+    });
+  },
+
+  createGoalWithMaterialsLocalJob(payload: GoalPayload, files: File[]) {
+    const body = new FormData();
+    body.append("title", payload.title);
+    body.append("goal_type", payload.goal_type);
+    if (payload.exam_date) {
+      body.append("exam_date", payload.exam_date);
+    }
+    if (payload.duration_days) {
+      body.append("duration_days", String(payload.duration_days));
+    }
+    body.append("daily_minutes", String(payload.daily_minutes));
+    body.append("current_level", payload.current_level);
+    body.append("key_topics", payload.key_topics.join(","));
+    files.forEach((file) => body.append("files", file));
+
+    return fetch(`${API_BASE_URL}/goals/with-materials/local-job`, {
+      method: "POST",
+      body
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Create goal job failed");
+      }
+      return response.json() as Promise<Job>;
     });
   },
 
@@ -368,6 +395,22 @@ export const api = {
     return request<CourseMaterial[]>(`/goals/${goalId}/materials`);
   },
 
+  ocrMaterial(materialId: number) {
+    return request<CourseMaterial>(`/materials/${materialId}/ocr`, {
+      method: "POST"
+    });
+  },
+
+  deleteMaterial(materialId: number) {
+    return fetch(`${API_BASE_URL}/materials/${materialId}`, {
+      method: "DELETE"
+    }).then(async (response) => {
+      if (!response.ok) {
+        throw new Error((await response.text()) || "Delete material failed");
+      }
+    });
+  },
+
   createKnowledgeSnippet(goalId: number, payload: KnowledgeSnippetPayload) {
     return request<CourseMaterial>(`/goals/${goalId}/knowledge/snippets`, {
       method: "POST",
@@ -416,12 +459,17 @@ export const api = {
     return request<PdfPageText>(`/materials/${materialId}/pdf/pages/${pageIndex}/text`);
   },
 
-  translatePdfPage(materialId: number, pageIndex: number, targetLanguage = "zh-CN") {
+  translatePdfPage(
+    materialId: number,
+    pageIndex: number,
+    targetLanguage = "zh-CN",
+    mode: "text" | "ocr" = "text"
+  ) {
     return request<PdfPageTranslation>(
       `/materials/${materialId}/pdf/pages/${pageIndex}/translate`,
       {
         method: "POST",
-        body: JSON.stringify({ target_language: targetLanguage })
+        body: JSON.stringify({ target_language: targetLanguage, mode })
       }
     );
   },

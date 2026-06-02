@@ -1,7 +1,9 @@
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response, StreamingResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app import crud, models
@@ -37,9 +39,12 @@ from app.core.config import get_settings
 from app.services.chunking import split_text_into_chunks
 from app.services.document_enrichment import enrich_chunks
 from app.services.knowledge_base import ChromaKnowledgeBase, collection_name_for_goal
+from app.services.local_jobs import start_goal_with_materials_job
 from app.services.material_pipeline import build_material_knowledge_base
-from app.services.materials import save_upload_file
+from app.services.materials import delete_material_files, save_upload_file
+from app.services.paddle_ocr import ensure_pdf_ocr
 from app.services.pdf_reader import pdf_meta, pdf_page_text, render_pdf_page_png
+from app.services.planning_context import knowledge_context_for_goal as planner_knowledge_context
 from app.services.quiz import generate_quiz_for_task, grade_quiz_answers
 from app.tasks.jobs import generate_goal_plan_task, parse_material_task
 
@@ -139,15 +144,21 @@ async def create_goal_with_materials(
     collection，最后把检索到的资料上下文交给 Planner Agent 生成总计划。
     """
 
-    payload = GoalCreate(
-        title=title,
-        goal_type=goal_type,
-        exam_date=exam_date,
-        duration_days=duration_days,
-        daily_minutes=daily_minutes,
-        current_level=current_level,
-        key_topics=_parse_key_topics(key_topics),
-    )
+    try:
+        payload = GoalCreate(
+            title=title.strip(),
+            goal_type=goal_type,
+            exam_date=exam_date,
+            duration_days=duration_days,
+            daily_minutes=daily_minutes,
+            current_level=current_level,
+            key_topics=_parse_key_topics(key_topics),
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=jsonable_encoder(exc.errors()),
+        ) from exc
     goal = crud.create_goal_only(db, payload, status="planning")
 
     for upload in files or []:
@@ -175,6 +186,78 @@ async def create_goal_with_materials(
     knowledge_context = _knowledge_context_for_goal(goal.id, payload)
     daily_plans = await workflow.generate_plan(payload, knowledge_context)
     return crud.replace_goal_plans(db, goal, daily_plans)
+
+
+@router.post(
+    "/goals/with-materials/local-job",
+    response_model=JobRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_goal_with_materials_local_job(
+    title: str = Form(...),
+    goal_type: str = Form("exam"),
+    exam_date: date | None = Form(None),
+    duration_days: int | None = Form(None),
+    daily_minutes: int = Form(...),
+    current_level: str = Form(...),
+    key_topics: str = Form(""),
+    files: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db),
+):
+    """本地无 Redis 模式：创建目标并在 FastAPI 进程内后台生成计划。
+
+    这个接口用于本地 Demo。它复用 jobs 表记录实时进度，但不需要 Celery worker
+    和 Redis。前端拿到 job_id 后轮询 `/jobs/{job_id}` 即可显示 OCR/RAG/LLM 阶段。
+    """
+
+    try:
+        payload = GoalCreate(
+            title=title.strip(),
+            goal_type=goal_type,
+            exam_date=exam_date,
+            duration_days=duration_days,
+            daily_minutes=daily_minutes,
+            current_level=current_level,
+            key_topics=_parse_key_topics(key_topics),
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=jsonable_encoder(exc.errors()),
+        ) from exc
+
+    goal = crud.create_goal_only(db, payload, status="planning")
+    material_ids: list[int] = []
+    for upload in files or []:
+        if not upload.filename:
+            continue
+        try:
+            storage_path, filename, file_type = save_upload_file(upload, goal.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        material = crud.create_course_material(
+            db,
+            goal_id=goal.id,
+            filename=filename,
+            file_type=file_type,
+            storage_path=storage_path,
+            chroma_collection=collection_name_for_goal(goal.id),
+        )
+        material_ids.append(material.id)
+
+    job = crud.create_job(
+        db,
+        job_type="local_goal_with_materials",
+        goal_id=goal.id,
+        result_json={
+            "stage": "queued",
+            "message": "学习目标已创建，等待本地后台任务启动。",
+            "goal_id": goal.id,
+            "material_count": len(material_ids),
+        },
+    )
+    start_goal_with_materials_job(job.id, goal.id, material_ids)
+    return job
 
 
 @router.post(
@@ -362,6 +445,33 @@ def read_course_material(material_id: int, db: Session = Depends(get_db)):
     return material
 
 
+@router.post("/materials/{material_id}/ocr", response_model=CourseMaterialRead)
+async def ocr_course_material(material_id: int, db: Session = Depends(get_db)):
+    """手动对阅读器 PDF 执行整份 PaddleOCR，并保存本地 Markdown 缓存。"""
+
+    material = _get_material_or_404(db, material_id)
+    if material.file_type.lower() != "pdf":
+        raise HTTPException(status_code=400, detail="当前 OCR 接口只支持 PDF。")
+    try:
+        ocr_result = await ensure_pdf_ocr(material)
+    except Exception as exc:
+        return crud.mark_material_failed(db, material, str(exc))
+    if ocr_result is None:
+        raise HTTPException(status_code=400, detail="当前未启用 PaddleOCR。")
+    return crud.mark_material_ocr_ready(db, material, len(ocr_result.pages))
+
+
+@router.delete("/materials/{material_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_course_material(material_id: int, db: Session = Depends(get_db)):
+    """删除单个素材，并同步清理 DB、Chroma、原始文件和 OCR 缓存。"""
+
+    material = _get_material_or_404(db, material_id)
+    ChromaKnowledgeBase().delete_material_documents(material.goal_id, material.id)
+    delete_material_files(material)
+    crud.delete_material(db, material)
+    return None
+
+
 @router.get("/materials/{material_id}/pdf/meta", response_model=MaterialPdfMetaRead)
 def read_pdf_meta(material_id: int, db: Session = Depends(get_db)):
     """读取 PDF 页数和可提取文本的页码列表。"""
@@ -417,6 +527,16 @@ async def translate_pdf_page(
     """翻译 PDF 当前页，并按页面文本 hash 缓存结果。"""
 
     material = _get_material_or_404(db, material_id)
+    if payload.mode == "ocr":
+        try:
+            ensure_result = await ensure_pdf_ocr(material)
+            if ensure_result is None:
+                raise HTTPException(status_code=400, detail="当前未启用 PaddleOCR。")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         page = pdf_page_text(material, page_index)
     except ValueError as exc:
@@ -440,6 +560,7 @@ async def translate_pdf_page(
             "target_lang": cached.target_lang,
             "text_hash": cached.text_hash,
             "translated_text": cached.translated_text,
+            "extraction_mode": payload.mode,
             "cached": True,
         }
 
@@ -453,7 +574,7 @@ async def translate_pdf_page(
         db,
         material_id=material.id,
         page_index=page_index,
-        source_lang="auto",
+        source_lang="ocr" if payload.mode == "ocr" else "auto",
         target_lang=payload.target_language,
         text_hash=page["text_hash"],
         translated_text=translated_text,
@@ -465,6 +586,7 @@ async def translate_pdf_page(
         "target_lang": translation.target_lang,
         "text_hash": translation.text_hash,
         "translated_text": translation.translated_text,
+        "extraction_mode": payload.mode,
         "cached": False,
     }
 
@@ -1207,13 +1329,7 @@ def _knowledge_context_for_goal(goal_id: int, payload: GoalCreate) -> list[dict]
     如果用户没有上传资料或 Chroma 暂时不可用，返回空列表，不影响普通计划生成。
     """
 
-    query = " ".join([payload.title, *payload.key_topics]).strip()
-    if not query:
-        return []
-    try:
-        return ChromaKnowledgeBase().query(goal_id, query, top_k=6)
-    except Exception:
-        return []
+    return planner_knowledge_context(goal_id, payload)
 
 
 def _knowledge_context_for_plan(plan: models.StudyPlan) -> list[dict]:

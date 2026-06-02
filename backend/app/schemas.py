@@ -234,6 +234,10 @@ class LLMHealthRead(BaseModel):
     configured: bool
     provider: str
     model: str
+    ocr_provider: str | None = None
+    ocr_enabled: bool = False
+    ocr_model: str | None = None
+    ocr_endpoint: str | None = None
     ok: bool
     reply: str | None = None
     error: str | None = None
@@ -301,6 +305,7 @@ class PdfPageTranslateRequest(BaseModel):
     """请求翻译 PDF 当前页。"""
 
     target_language: str = Field(default="zh-CN", max_length=20)
+    mode: Literal["text", "ocr"] = "text"
 
 
 class PdfPageTranslationRead(BaseModel):
@@ -312,6 +317,7 @@ class PdfPageTranslationRead(BaseModel):
     target_lang: str
     text_hash: str
     translated_text: str
+    extraction_mode: Literal["text", "ocr"] = "text"
     cached: bool
 
 
