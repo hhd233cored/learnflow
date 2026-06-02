@@ -1221,6 +1221,7 @@ def _chat_system_prompt(context: str) -> str:
             "如果用户询问知识点，请先解释直觉，再给简短例子或记忆方法。",
             "请使用 Markdown 组织答案；代码、命令和配置用 fenced code block。",
             "数学公式请使用 LaTeX：行内公式用 \\(...\\)，独立公式用 \\[...\\]。",
+            "题干、选项和列表标题里如果包含公式，也必须用 \\(...\\) 包起来，不要裸写 \\frac、\\int、_、^。",
             "如果提供了当前计划、任务或课程资料上下文，请优先结合这些内容。",
             "系统已注册轻量工具：KnowledgeSearchTool、KnowledgeIngestTool、ReviewTool、AdjustPlanTool、ReadPDFPageTool；如果上下文里出现工具结果，请直接解释结果并给下一步建议。",
             "不要编造资料中没有的页码、公式编号或教材原句。",

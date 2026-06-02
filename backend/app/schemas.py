@@ -247,7 +247,7 @@ class ChatMessage(BaseModel):
     """聊天抽屉中的单条消息。"""
 
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=6000)
+    content: str = Field(min_length=1, max_length=12000)
 
 
 class ReadingContext(BaseModel):

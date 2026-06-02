@@ -7,6 +7,85 @@ from app.agents.llm import DeepSeekClient
 from app.core.config import get_settings
 
 
+LATEX_COMMAND_WORDS = {
+    "begin",
+    "cdot",
+    "displaystyle",
+    "dfrac",
+    "frac",
+    "hline",
+    "left",
+    "mathrm",
+    "qquad",
+    "quad",
+    "right",
+    "text",
+    "times",
+    "to",
+}
+
+LATEX_COMMAND_REPLACEMENTS = {
+    "alpha": "alpha",
+    "beta": "beta",
+    "delta": "delta",
+    "Delta": "Delta",
+    "epsilon": "epsilon",
+    "frac": "fraction",
+    "gamma": "gamma",
+    "Gamma": "Gamma",
+    "ge": "greater than or equal",
+    "geq": "greater than or equal",
+    "infty": "infinity",
+    "int": "integral",
+    "lambda": "lambda",
+    "Lambda": "Lambda",
+    "le": "less than or equal",
+    "leq": "less than or equal",
+    "lim": "limit",
+    "ln": "logarithm",
+    "log": "logarithm",
+    "mu": "mu",
+    "nabla": "gradient",
+    "neq": "not equal",
+    "omega": "omega",
+    "Omega": "Omega",
+    "partial": "partial derivative",
+    "phi": "phi",
+    "pi": "pi",
+    "prod": "product",
+    "sigma": "sigma",
+    "Sigma": "Sigma",
+    "sqrt": "square root",
+    "sum": "summation",
+    "theta": "theta",
+    "Theta": "Theta",
+}
+
+TERM_STOPWORDS = {
+    "and",
+    "are",
+    "for",
+    "from",
+    "left",
+    "right",
+    "that",
+    "there",
+    "this",
+    "with",
+}
+
+FORMULA_TERM_STOPWORDS = {
+    "dx",
+    "dy",
+    "dz",
+    "fraction",
+    "over",
+    "power",
+    "subscript",
+    "superscript",
+}
+
+
 class EnrichedChunk(TypedDict):
     """增强后的文档 chunk。
 
@@ -34,18 +113,21 @@ async def enrich_chunks(chunks: list[str], filename: str) -> list[EnrichedChunk]
     enriched: list[EnrichedChunk] = []
 
     for index, chunk in enumerate(chunks):
-        fallback = _fallback_enrichment(chunk)
+        retrieval_text = clean_text_for_retrieval(chunk)
+        fallback = _fallback_enrichment(retrieval_text)
 
         if settings.deepseek_api_key and index < settings.rag_enrich_max_chunks:
             result = await llm.complete_json(
                 system_prompt=(
                     "你是课程资料 RAG 预处理助手。请分析一个课程文档片段，"
                     "识别语言，生成中文摘要，并抽取中英术语对。必须返回 JSON。"
+                    "key_terms 只能包含课程概念、定理、方法、章节术语；不要把 LaTeX 命令、"
+                    "单个变量名、公式片段、页码或排版符号当作术语。"
                 ),
                 user_payload={
                     "filename": filename,
                     "chunk_index": index,
-                    "content": chunk[:4000],
+                    "content": retrieval_text[:4000],
                     "schema": {
                         "source_lang": "en|zh|mixed|unknown",
                         "summary_zh": "用中文概括这个片段的核心内容",
@@ -56,9 +138,9 @@ async def enrich_chunks(chunks: list[str], filename: str) -> list[EnrichedChunk]
                 },
                 fallback=fallback,
             )
-            normalized = _normalize_enrichment(chunk, result, fallback)
+            normalized = _normalize_enrichment(chunk, retrieval_text, result, fallback)
         else:
-            normalized = _normalize_enrichment(chunk, fallback, fallback)
+            normalized = _normalize_enrichment(chunk, retrieval_text, fallback, fallback)
 
         enriched.append(normalized)
 
@@ -85,7 +167,7 @@ def _fallback_enrichment(content: str) -> dict[str, Any]:
 
 
 def _normalize_enrichment(
-    content: str, raw: dict[str, Any], fallback: dict[str, Any]
+    content: str, retrieval_text: str, raw: dict[str, Any], fallback: dict[str, Any]
 ) -> EnrichedChunk:
     """校验模型输出，并生成最终写入 Chroma 的增强文本。"""
 
@@ -101,7 +183,7 @@ def _normalize_enrichment(
     embedding_text = "\n".join(
         item
         for item in [
-            content,
+            retrieval_text or content,
             f"中文摘要：{summary_zh}" if summary_zh else "",
             "核心术语：" + "；".join(term_lines) if term_lines else "",
         ]
@@ -135,21 +217,23 @@ def _extract_terms(text: str) -> list[dict[str, str]]:
     """从文本里抽取少量候选术语，作为无 LLM 时的兜底术语表。"""
 
     terms: list[dict[str, str]] = []
-    english_terms = re.findall(r"\b[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z][A-Za-z0-9-]*){0,2}\b", text)
+    cleaned_text = clean_text_for_retrieval(text)
+    english_terms = re.findall(
+        r"\b[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z][A-Za-z0-9-]*){0,2}\b",
+        cleaned_text,
+    )
     for term in english_terms:
-        cleaned = term.strip()
-        if len(cleaned) < 4:
-            continue
-        if cleaned.lower() in {"this", "that", "with", "from", "there", "which"}:
+        cleaned = clean_key_term(term.strip())
+        if not is_valid_key_term(cleaned):
             continue
         if cleaned not in [item["source"] for item in terms]:
             terms.append({"source": cleaned[:80], "zh": ""})
         if len(terms) >= 8:
             break
 
-    chinese_terms = re.findall(r"[\u4e00-\u9fff]{2,8}", text)
+    chinese_terms = re.findall(r"[\u4e00-\u9fff]{2,8}", cleaned_text)
     for term in chinese_terms:
-        if term not in [item["zh"] for item in terms]:
+        if is_valid_key_term(term) and term not in [item["zh"] for item in terms]:
             terms.append({"source": term, "zh": term})
         if len(terms) >= 10:
             break
@@ -170,12 +254,89 @@ def _normalize_terms(value: Any, fallback: list[dict[str, str]]) -> list[dict[st
         else:
             source = str(item).strip()
             zh = ""
+        source = clean_key_term(source)
+        zh = clean_key_term(zh)
+        if not source and not zh:
+            continue
+        if source and not is_valid_key_term(source):
+            source = ""
+        if zh and not is_valid_key_term(zh):
+            zh = ""
         if not source and not zh:
             continue
         normalized.append({"source": source[:80], "zh": zh[:80]})
         if len(normalized) >= 10:
             break
-    return normalized or fallback[:10]
+    return normalized or [
+        item
+        for item in fallback[:10]
+        if is_valid_key_term(item.get("source", "")) or is_valid_key_term(item.get("zh", ""))
+    ]
+
+
+def clean_text_for_retrieval(text: str) -> str:
+    """为检索和术语抽取清洗 LaTeX 排版噪声，保留公式语义提示。"""
+
+    cleaned = text
+    cleaned = re.sub(r"```.*?```", " ", cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", cleaned)
+    cleaned = cleaned.replace("\\left", " ").replace("\\right", " ")
+    cleaned = re.sub(r"\\(?:mathrm|operatorname|text)\{([^{}]*)\}", r" \1 ", cleaned)
+    cleaned = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r" fraction \1 over \2 ", cleaned)
+    cleaned = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r" square root \1 ", cleaned)
+    cleaned = re.sub(r"\\begin\{[^{}]+\}|\\end\{[^{}]+\}", " ", cleaned)
+
+    def replace_command(match: re.Match[str]) -> str:
+        command = match.group(1)
+        if command in LATEX_COMMAND_WORDS:
+            return " "
+        return f" {LATEX_COMMAND_REPLACEMENTS.get(command, '')} "
+
+    cleaned = re.sub(r"\\([A-Za-z]+)", replace_command, cleaned)
+    cleaned = cleaned.replace("^", " power ").replace("_", " subscript ")
+    cleaned = re.sub(r"[{}\\]+", " ", cleaned)
+    cleaned = re.sub(r"[=+\-*/<>|()[\],.;:]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def clean_key_term(term: str) -> str:
+    """清理模型返回的单个术语，避免把公式片段写入标签。"""
+
+    cleaned = term.strip()
+    cleaned = re.sub(r"^\$+|\$+$", "", cleaned)
+    cleaned = re.sub(r"^\\\(|\\\)$|^\\\[|\\\]$", "", cleaned).strip()
+    cleaned = re.sub(r"\s+[A-Za-z]$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def is_valid_key_term(term: str) -> bool:
+    """判断术语是否像课程概念，而不是 LaTeX 命令、变量或公式片段。"""
+
+    cleaned = clean_key_term(term)
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered in TERM_STOPWORDS or lowered in LATEX_COMMAND_WORDS:
+        return False
+    words = [word.lower() for word in re.findall(r"[A-Za-z]+", cleaned)]
+    if any(word in FORMULA_TERM_STOPWORDS for word in words):
+        return False
+    if lowered in {key.lower() for key in LATEX_COMMAND_REPLACEMENTS}:
+        return False
+    if "\\" in cleaned or any(char in cleaned for char in "{}^_"):
+        return False
+    if re.fullmatch(r"[A-Za-z]", cleaned):
+        return False
+    if re.fullmatch(r"[\d\s.,:/+-]+", cleaned):
+        return False
+    if len(cleaned) < 2:
+        return False
+    symbol_count = len(re.findall(r"[^A-Za-z0-9\u4e00-\u9fff\s-]", cleaned))
+    if symbol_count > max(1, len(cleaned) // 4):
+        return False
+    return True
 
 
 def _shorten_zh(text: str) -> str:

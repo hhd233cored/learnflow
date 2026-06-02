@@ -98,6 +98,11 @@ const SETTINGS_STORAGE_KEY = "studyagent:appSettings";
 const BACKGROUND_IMAGE_DB_NAME = "studyagent-assets";
 const BACKGROUND_IMAGE_STORE_NAME = "settings";
 const BACKGROUND_IMAGE_KEY = "background-image";
+const CHAT_HISTORY_LIMIT = 12;
+const MAX_CHAT_MESSAGE_CHARS = 12000;
+const COMPRESS_CHAT_MESSAGE_AT = 9000;
+const MAX_CHAT_CONTEXT_CHARS = 20000;
+const RECENT_CHAT_MESSAGES_TO_KEEP = 4;
 const defaultAppSettings: AppSettings = {
   theme: "default",
   panelOpacity: 100,
@@ -631,9 +636,7 @@ export function ChatDrawer({
 
     try {
       const reader = await api.streamChat({
-        messages: nextMessages
-          .filter((message) => message.content.trim())
-          .slice(-12),
+        messages: buildChatRequestMessages(nextMessages),
         goal_id: goal?.id,
         plan_id: selectedPlan?.id,
         reading_context: readingContext ?? null
@@ -664,7 +667,7 @@ export function ChatDrawer({
         await onWorkspaceChange?.();
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "聊天请求失败";
+      const message = chatErrorMessage(err);
       setMessages((current) => {
         const updated = [...current];
         updated[updated.length - 1] = {
@@ -1699,6 +1702,118 @@ function panelDescription(panel: DrawerPanel | null, selectedPlan: StudyPlan | n
     : "当前上下文：通用问答";
 }
 
+function buildChatRequestMessages(messages: ChatMessage[]) {
+  const recent = messages
+    .filter((message) => message.content.trim())
+    .slice(-CHAT_HISTORY_LIMIT);
+  const keepFromIndex = Math.max(0, recent.length - RECENT_CHAT_MESSAGES_TO_KEEP);
+  let prepared = recent.map((message, index) => {
+    if (
+      message.content.length > COMPRESS_CHAT_MESSAGE_AT &&
+      (index < keepFromIndex || message.content.length > MAX_CHAT_MESSAGE_CHARS)
+    ) {
+      return compressChatMessage(message);
+    }
+    return clampChatMessage(message);
+  });
+
+  while (totalMessageChars(prepared) > MAX_CHAT_CONTEXT_CHARS) {
+    const index = prepared.findIndex(
+      (message, itemIndex) =>
+        itemIndex < keepFromIndex &&
+        !message.content.startsWith("【已压缩的长回复】")
+    );
+    if (index < 0) {
+      break;
+    }
+    prepared[index] = compressChatMessage(prepared[index]);
+  }
+
+  if (totalMessageChars(prepared) > MAX_CHAT_CONTEXT_CHARS) {
+    prepared = prepared.map((message, index) =>
+      index < keepFromIndex ? compactChatMessage(message) : message
+    );
+  }
+
+  return prepared.map(clampChatMessage);
+}
+
+function compressChatMessage(message: ChatMessage): ChatMessage {
+  if (message.role === "user") {
+    return compactChatMessage(message);
+  }
+
+  const content = message.content;
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const title = lines.find((line) => /^#{1,4}\s+/.test(line)) ?? lines[0] ?? "长回复";
+  const usefulLines = lines.filter((line) => isUsefulCompressedLine(line)).slice(0, 24);
+  const body =
+    usefulLines.length > 0
+      ? usefulLines.map((line) => `- ${stripMarkdownHeading(line)}`).join("\n")
+      : content.slice(0, 1800);
+
+  return {
+    role: message.role,
+    content: [
+      "【已压缩的长回复】",
+      `主题：${stripMarkdownHeading(title).slice(0, 120)}`,
+      `原文长度：${content.length} 字符`,
+      "保留要点：",
+      body
+    ].join("\n")
+  };
+}
+
+function compactChatMessage(message: ChatMessage): ChatMessage {
+  if (message.content.length <= MAX_CHAT_MESSAGE_CHARS) {
+    return message;
+  }
+  return {
+    role: message.role,
+    content: `${message.content.slice(0, MAX_CHAT_MESSAGE_CHARS - 80)}\n\n【内容过长，后文已在发送给后端前省略】`
+  };
+}
+
+function clampChatMessage(message: ChatMessage): ChatMessage {
+  if (message.content.length <= MAX_CHAT_MESSAGE_CHARS) {
+    return message;
+  }
+  return compactChatMessage(message);
+}
+
+function totalMessageChars(messages: ChatMessage[]) {
+  return messages.reduce((total, message) => total + message.content.length, 0);
+}
+
+function isUsefulCompressedLine(line: string) {
+  return (
+    /^#{1,4}\s+/.test(line) ||
+    /^答案[:：]/.test(line) ||
+    /^(第\d+题|题干|解析|结论|故答案|因此答案|注意|记忆方法)[:：]?/.test(line) ||
+    /^\d+[.、]\s+/.test(line) ||
+    /^[A-D][.、]/.test(line) ||
+    /\\\(|\\\[|\$|\\frac|\\int|\\sum|\\partial|积分|公式|定理|答案/.test(line)
+  );
+}
+
+function stripMarkdownHeading(line: string) {
+  return line.replace(/^#{1,6}\s+/, "").replace(/^[-*+]\s+/, "").trim();
+}
+
+function chatErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/string_too_long|max_length|at most \d+ characters/i.test(raw)) {
+    return "历史消息过长，已启用自动压缩。请重新发送一次；如果仍失败，可以新建会话。";
+  }
+  if (raw.trim().startsWith("{") || raw.length > 800) {
+    return "聊天请求失败，请稍后重试。";
+  }
+  return raw || "聊天请求失败";
+}
+
 function MaterialCard({
   deleting,
   material,
@@ -2012,12 +2127,79 @@ function MarkdownMessage({ content }: { content: string }) {
 }
 
 function normalizeMathMarkdown(content: string) {
-  return normalizeAccidentalIndentedMarkdown(normalizeCompactMarkdownTables(content))
+  return normalizeBareNumberedMathLines(
+    normalizeAccidentalIndentedMarkdown(normalizeCompactMarkdownTables(content))
+  )
     .replace(
       /\\\[((?:.|\n)*?)\\\]/g,
       (_, formula: string) => `\n$$\n${formula.trim()}\n$$\n`
     )
     .replace(/\\\(((?:.|\n)*?)\\\)/g, (_, formula: string) => `$${formula.trim()}$`);
+}
+
+function normalizeBareNumberedMathLines(content: string) {
+  let insideFence = false;
+
+  return content
+    .split("\n")
+    .map((line) => {
+      if (/^\s*```/.test(line)) {
+        insideFence = !insideFence;
+        return line;
+      }
+      if (insideFence || /[$]|\\\(|\\\[/.test(line)) {
+        return line;
+      }
+
+      const match = line.match(/^(\s*(?:[-*+]\s*)?\d+[.、]\s+)(.+)$/);
+      if (!match || !looksLikeBareMath(match[2])) {
+        return line;
+      }
+
+      return `${match[1]}${wrapBareMathQuestion(match[2])}`;
+    })
+    .join("\n");
+}
+
+function wrapBareMathQuestion(text: string) {
+  let result = text;
+  result = result.replace(
+    /(A|B|C|D)\(([^)]*\d[^)]*)\)/g,
+    (_match, label: string, body: string) => `${label}(${wrapInlineMath(body)})`
+  );
+  result = result.replace(/([A-Za-z]):\s*([^\u4e00-\u9fff，,；;。]*[\^_²³√∫Σ∑\\=][^\u4e00-\u9fff，,；;。]*)/g, (
+    _match,
+    label: string,
+    formula: string
+  ) => `${label}: ${wrapInlineMath(normalizeBareMathFormula(formula.trim()))}`);
+  result = result.replace(
+    /(^|[，,；;：:]\s*)([^\u4e00-\u9fff，,；;。]*[\^_²³√∫Σ∑\\][^\u4e00-\u9fff，,；;。]*)/g,
+    (_match, prefix: string, formula: string) =>
+      `${prefix}${wrapInlineMath(normalizeBareMathFormula(formula.trim()))}`
+  );
+  return result;
+}
+
+function looksLikeBareMath(text: string) {
+  return /\\[A-Za-z]+|[∫Σ∑√]|[_^]|[A-Za-z]\s*=|[²³]/.test(text);
+}
+
+function normalizeBareMathFormula(formula: string) {
+  return formula
+    .replace(/∫/g, "\\int")
+    .replace(/Σ|∑/g, "\\sum")
+    .replace(/√/g, "\\sqrt")
+    .replace(/²/g, "^2")
+    .replace(/³/g, "^3")
+    .replace(/½/g, "\\frac{1}{2}");
+}
+
+function wrapInlineMath(formula: string) {
+  const trimmed = formula.trim();
+  if (!trimmed || trimmed.startsWith("\\(") || trimmed.startsWith("$")) {
+    return formula;
+  }
+  return `\\(${trimmed}\\)`;
 }
 
 function normalizeCompactMarkdownTables(content: string) {
