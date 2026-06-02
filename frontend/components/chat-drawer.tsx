@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookOpen,
   ImageIcon,
@@ -133,7 +133,6 @@ export function ChatDrawer({
   const [chatSessionsReady, setChatSessionsReady] = useState(false);
   const [activeSessionLoaded, setActiveSessionLoaded] = useState(false);
   const [chatSessionError, setChatSessionError] = useState<string | null>(null);
-  const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [knowledgeGoalId, setKnowledgeGoalId] = useState<number | null>(
     goal?.id ?? null
@@ -611,8 +610,8 @@ export function ChatDrawer({
     }
   }
 
-  async function sendMessage() {
-    const content = input.trim();
+  async function sendMessage(rawContent: string) {
+    const content = rawContent.trim();
     if (!content || streaming) {
       return;
     }
@@ -628,7 +627,6 @@ export function ChatDrawer({
       { role: "assistant", content: "" }
     ];
     setMessages(nextMessages);
-    setInput("");
     setStreaming(true);
 
     try {
@@ -743,26 +741,6 @@ export function ChatDrawer({
     } finally {
       setInsertingKnowledge(false);
     }
-  }
-
-  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void sendMessage();
-    }
-  }
-
-  function renderMessage(message: ChatMessage) {
-    if (!message.content) {
-      return (
-        <span className="inline-flex items-center gap-2 text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-          思考中
-        </span>
-      );
-    }
-
-    return <MarkdownMessage content={message.content} />;
   }
 
   return (
@@ -898,15 +876,11 @@ export function ChatDrawer({
             activeSessionId={activeSessionId}
             chatSessionError={chatSessionError}
             chatSessions={chatSessions}
-            input={input}
             messages={messages}
             onCreateSession={() => void createNewChatSession()}
             onDeleteSession={() => void removeActiveChatSession()}
-            onInputChange={setInput}
-            onKeyDown={handleKeyDown}
-            onSend={() => void sendMessage()}
+            onSend={(content) => void sendMessage(content)}
             onSelectSession={(sessionId) => void selectChatSession(sessionId)}
-            renderMessage={renderMessage}
             scrollAreaRef={scrollAreaRef}
             streaming={streaming}
           />
@@ -1112,30 +1086,22 @@ function ChatPanel({
   activeSessionId,
   chatSessionError,
   chatSessions,
-  input,
   messages,
   onCreateSession,
   onDeleteSession,
-  onInputChange,
-  onKeyDown,
   onSend,
   onSelectSession,
-  renderMessage,
   scrollAreaRef,
   streaming
 }: {
   activeSessionId: string | null;
   chatSessionError: string | null;
   chatSessions: ChatSession[];
-  input: string;
   messages: ChatMessage[];
   onCreateSession: () => void;
   onDeleteSession: () => void;
-  onInputChange: (value: string) => void;
-  onKeyDown: (event: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  onSend: () => void;
+  onSend: (content: string) => void;
   onSelectSession: (sessionId: string) => void;
-  renderMessage: (message: ChatMessage) => React.ReactNode;
   scrollAreaRef: React.RefObject<HTMLDivElement | null>;
   streaming: boolean;
 }) {
@@ -1190,50 +1156,99 @@ function ChatPanel({
         ref={scrollAreaRef}
       >
         {messages.map((message, index) => (
-          <div
-            className={cn(
-              "flex",
-              message.role === "user" ? "justify-end" : "justify-start"
-            )}
+          <ChatMessageBubble
             key={`${message.role}-${index}`}
-          >
-            <div
-              className={cn(
-                "max-w-[92%] rounded-md px-3 py-2 text-sm leading-6",
-                message.role === "user"
-                  ? "bg-primary text-primary-foreground"
-                  : "border bg-background text-foreground"
-              )}
-            >
-              {renderMessage(message)}
-            </div>
-          </div>
+            message={message}
+          />
         ))}
       </div>
 
-      <div className="border-t p-4">
-        <div className="flex gap-2">
-          <Textarea
-            className="min-h-11 flex-1 resize-none"
-            value={input}
-            onChange={(event) => onInputChange(event.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="输入问题，或说“帮我复盘并调整明天计划”..."
-            disabled={streaming}
-          />
-          <Button
-            size="icon"
-            onClick={onSend}
-            disabled={!input.trim() || streaming}
-            title="发送"
-          >
-            {streaming ? (
-              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Send className="h-4 w-4" aria-hidden="true" />
-            )}
-          </Button>
-        </div>
+      <ChatComposer onSend={onSend} streaming={streaming} />
+    </div>
+  );
+}
+
+const ChatMessageBubble = memo(function ChatMessageBubble({
+  message
+}: {
+  message: ChatMessage;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex",
+        message.role === "user" ? "justify-end" : "justify-start"
+      )}
+    >
+      <div
+        className={cn(
+          "max-w-[92%] rounded-md px-3 py-2 text-sm leading-6",
+          message.role === "user"
+            ? "bg-primary text-primary-foreground"
+            : "border bg-background text-foreground"
+        )}
+      >
+        {message.content ? (
+          <MarkdownMessage content={message.content} />
+        ) : (
+          <span className="inline-flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            思考中
+          </span>
+        )}
+      </div>
+    </div>
+  );
+});
+
+function ChatComposer({
+  onSend,
+  streaming
+}: {
+  onSend: (content: string) => void;
+  streaming: boolean;
+}) {
+  const [input, setInput] = useState("");
+
+  function submit() {
+    const content = input.trim();
+    if (!content || streaming) {
+      return;
+    }
+    onSend(content);
+    setInput("");
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  }
+
+  return (
+    <div className="border-t p-4">
+      <div className="flex gap-2">
+        <Textarea
+          className="min-h-11 flex-1 resize-none"
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="输入问题，或说“帮我复盘并调整明天计划”..."
+          disabled={streaming}
+        />
+        <Button
+          size="icon"
+          onClick={submit}
+          disabled={!input.trim() || streaming}
+          title="发送"
+        >
+          {streaming ? (
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Send className="h-4 w-4" aria-hidden="true" />
+          )}
+        </Button>
       </div>
     </div>
   );
