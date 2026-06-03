@@ -99,9 +99,10 @@ const BACKGROUND_IMAGE_DB_NAME = "studyagent-assets";
 const BACKGROUND_IMAGE_STORE_NAME = "settings";
 const BACKGROUND_IMAGE_KEY = "background-image";
 const CHAT_HISTORY_LIMIT = 12;
-const MAX_CHAT_MESSAGE_CHARS = 12000;
-const COMPRESS_CHAT_MESSAGE_AT = 9000;
-const MAX_CHAT_CONTEXT_CHARS = 20000;
+const MAX_CHAT_MESSAGE_CHARS = 24000;
+const COMPRESS_CHAT_MESSAGE_AT = 16000;
+const CHAT_COMPRESS_TARGET_CHARS = 6000;
+const MAX_CHAT_CONTEXT_CHARS = 36000;
 const RECENT_CHAT_MESSAGES_TO_KEEP = 4;
 const defaultAppSettings: AppSettings = {
   theme: "default",
@@ -635,8 +636,9 @@ export function ChatDrawer({
     setStreaming(true);
 
     try {
+      const requestMessages = await buildChatRequestMessages(nextMessages);
       const reader = await api.streamChat({
-        messages: buildChatRequestMessages(nextMessages),
+        messages: requestMessages,
         goal_id: goal?.id,
         plan_id: selectedPlan?.id,
         reading_context: readingContext ?? null
@@ -1702,20 +1704,23 @@ function panelDescription(panel: DrawerPanel | null, selectedPlan: StudyPlan | n
     : "当前上下文：通用问答";
 }
 
-function buildChatRequestMessages(messages: ChatMessage[]) {
+async function buildChatRequestMessages(messages: ChatMessage[]) {
   const recent = messages
     .filter((message) => message.content.trim())
     .slice(-CHAT_HISTORY_LIMIT);
   const keepFromIndex = Math.max(0, recent.length - RECENT_CHAT_MESSAGES_TO_KEEP);
-  let prepared = recent.map((message, index) => {
-    if (
-      message.content.length > COMPRESS_CHAT_MESSAGE_AT &&
-      (index < keepFromIndex || message.content.length > MAX_CHAT_MESSAGE_CHARS)
-    ) {
+  const olderMessages = recent.slice(0, keepFromIndex);
+  const keptMessages = recent.slice(keepFromIndex).map((message) => {
+    if (message.content.length > MAX_CHAT_MESSAGE_CHARS) {
       return compressChatMessage(message);
     }
-    return clampChatMessage(message);
+    return message;
   });
+
+  let prepared = [
+    ...(await compressOlderChatMessagesIfNeeded(olderMessages, keptMessages)),
+    ...keptMessages
+  ];
 
   while (totalMessageChars(prepared) > MAX_CHAT_CONTEXT_CHARS) {
     const index = prepared.findIndex(
@@ -1736,6 +1741,47 @@ function buildChatRequestMessages(messages: ChatMessage[]) {
   }
 
   return prepared.map(clampChatMessage);
+}
+
+async function compressOlderChatMessagesIfNeeded(
+  olderMessages: ChatMessage[],
+  keptMessages: ChatMessage[]
+) {
+  if (olderMessages.length === 0) {
+    return [];
+  }
+
+  const shouldCompress =
+    olderMessages.some((message) => message.content.length > COMPRESS_CHAT_MESSAGE_AT) ||
+    totalMessageChars([...olderMessages, ...keptMessages]) > MAX_CHAT_CONTEXT_CHARS;
+  if (!shouldCompress) {
+    return olderMessages;
+  }
+
+  try {
+    const result = await api.compressChat({
+      messages: olderMessages.map(clampChatCompressionMessage),
+      target_chars: CHAT_COMPRESS_TARGET_CHARS
+    });
+    return [clampChatMessage(result.message)];
+  } catch {
+    return [compressChatMessage({ role: "assistant", content: olderMessages.map(formatChatMessageForCompression).join("\n\n") })];
+  }
+}
+
+function clampChatCompressionMessage(message: ChatMessage): ChatMessage {
+  const maxCompressionInputChars = 59000;
+  if (message.content.length <= maxCompressionInputChars) {
+    return message;
+  }
+  return {
+    role: message.role,
+    content: `${message.content.slice(0, maxCompressionInputChars)}\n\n【内容过长，后文已在压缩前省略】`
+  };
+}
+
+function formatChatMessageForCompression(message: ChatMessage) {
+  return `${message.role === "user" ? "用户" : "助手"}：\n${message.content}`;
 }
 
 function compressChatMessage(message: ChatMessage): ChatMessage {

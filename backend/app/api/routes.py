@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -12,6 +13,8 @@ from app.agents.llm import DeepSeekClient
 from app.db.session import get_db
 from app.schemas import (
     AdjustmentRequest,
+    ChatCompressRequest,
+    ChatCompressResponse,
     ChatStreamRequest,
     CourseMaterialRead,
     GoalCreate,
@@ -49,6 +52,8 @@ from app.services.quiz import generate_quiz_for_task, grade_quiz_answers
 from app.tasks.jobs import generate_goal_plan_task, parse_material_task
 
 router = APIRouter(prefix="/api/v1")
+
+CHAT_COMPRESS_FALLBACK_CHARS = 6000
 
 
 @router.get("/health")
@@ -99,6 +104,46 @@ async def stream_chat(payload: ChatStreamRequest, db: Session = Depends(get_db))
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@router.post("/chat/compress", response_model=ChatCompressResponse)
+async def compress_chat_history(payload: ChatCompressRequest):
+    """把较长的聊天历史压缩成一条可继续参与上下文的摘要消息。"""
+
+    original_chars = sum(len(item.content) for item in payload.messages)
+    fallback_summary = _fallback_compress_chat_messages(
+        [item.model_dump() for item in payload.messages],
+        target_chars=payload.target_chars,
+    )
+    result = await DeepSeekClient().complete_json(
+        system_prompt=(
+            "你是 StudyAgent 的聊天历史压缩器。请把较长的学习对话压缩成一条摘要，"
+            "用于后续继续问答。必须返回 JSON。保留题目编号、最终答案、关键公式、"
+            "推导路线、用户明确纠错点、PDF 页码或资料来源。不要保留寒暄、重复解释、"
+            "完整长推导、错误 JSON 和格式噪声。数学公式继续使用 LaTeX 分隔符。"
+        ),
+        user_payload={
+            "target_chars": payload.target_chars,
+            "messages": [item.model_dump() for item in payload.messages],
+            "schema": {
+                "summary": "压缩后的中文上下文摘要，适合继续对话",
+            },
+        },
+        fallback={"summary": fallback_summary},
+    )
+    summary = str(result.get("summary") or fallback_summary).strip()
+    if not summary:
+        summary = fallback_summary
+    if len(summary) > 24000:
+        summary = summary[:23960] + "\n【压缩摘要过长，已截断】"
+    return {
+        "message": {
+            "role": "assistant",
+            "content": summary,
+        },
+        "compressed": True,
+        "original_chars": original_chars,
+    }
 
 
 @router.post("/goals", response_model=GoalRead, status_code=status.HTTP_201_CREATED)
@@ -1229,6 +1274,63 @@ def _chat_system_prompt(context: str) -> str:
             context or "暂无学习上下文。",
         ]
     )
+
+
+def _fallback_compress_chat_messages(
+    messages: list[dict[str, str]], target_chars: int = CHAT_COMPRESS_FALLBACK_CHARS
+) -> str:
+    """不调用模型时的确定性聊天历史压缩兜底。"""
+
+    lines: list[str] = [
+        "【已压缩的聊天历史】",
+        f"原始消息数：{len(messages)}",
+        "保留要点：",
+    ]
+    for index, message in enumerate(messages, start=1):
+        role = message.get("role", "assistant")
+        content = str(message.get("content") or "")
+        useful = _useful_chat_lines(content)
+        if useful:
+            lines.append(f"{index}. {role}：")
+            lines.extend(f"- {line}" for line in useful[:10])
+        else:
+            preview = content.strip().replace("\n", " ")[:300]
+            if preview:
+                lines.append(f"{index}. {role}：{preview}")
+        if len("\n".join(lines)) >= target_chars:
+            break
+
+    summary = "\n".join(lines)
+    if len(summary) > target_chars:
+        summary = summary[: max(0, target_chars - 20)] + "\n【已截断】"
+    return summary
+
+
+def _useful_chat_lines(content: str) -> list[str]:
+    """从长回复里抽取适合压缩摘要保留的行。"""
+
+    patterns = [
+        r"^#{1,4}\s+",
+        r"^答案[:：]",
+        r"^(第\d+题|题干|解析|结论|故答案|因此答案|注意|记忆方法)[:：]?",
+        r"^\d+[.、]\s+",
+        r"^[A-D][.、]",
+        r"\\\(|\\\[|\$|\\frac|\\int|\\sum|\\partial|积分|公式|定理|答案",
+    ]
+    useful: list[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if any(re.search(pattern, line) for pattern in patterns):
+            useful.append(_strip_markdown_marker(line)[:500])
+        if len(useful) >= 24:
+            break
+    return useful
+
+
+def _strip_markdown_marker(line: str) -> str:
+    return re.sub(r"^(#{1,6}\s+|[-*+]\s+)", "", line).strip()
 
 
 def _fallback_chat_reply(payload: ChatStreamRequest, context: str) -> str:

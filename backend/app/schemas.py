@@ -247,7 +247,14 @@ class ChatMessage(BaseModel):
     """聊天抽屉中的单条消息。"""
 
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=12000)
+    content: str = Field(min_length=1, max_length=24000)
+
+
+class ChatCompressMessage(BaseModel):
+    """用于压缩历史上下文的聊天消息，允许接收更长的旧回复。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=60000)
 
 
 class ReadingContext(BaseModel):
@@ -264,6 +271,21 @@ class ChatStreamRequest(BaseModel):
     goal_id: int | None = None
     plan_id: int | None = None
     reading_context: ReadingContext | None = None
+
+
+class ChatCompressRequest(BaseModel):
+    """请求把较长的聊天历史压缩成一条摘要上下文。"""
+
+    messages: list[ChatCompressMessage] = Field(min_length=1, max_length=20)
+    target_chars: int = Field(default=6000, ge=1000, le=12000)
+
+
+class ChatCompressResponse(BaseModel):
+    """聊天历史压缩结果。"""
+
+    message: ChatMessage
+    compressed: bool = True
+    original_chars: int
 
 
 class CourseMaterialRead(BaseModel):

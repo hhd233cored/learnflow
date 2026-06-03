@@ -61,6 +61,13 @@ const MAX_PLAN_POLL_COUNT = 120;
 const USE_ASYNC_JOBS = process.env.NEXT_PUBLIC_USE_ASYNC_JOBS === "true";
 const LAST_GOAL_ID_KEY = "studyagent:lastGoalId";
 const SELECTED_PLAN_PREFIX = "studyagent:selectedPlanId:";
+const READER_PROGRESS_PREFIX = "studyagent:readerProgress:";
+
+type ReaderProgress = {
+  materialId: number;
+  page: number;
+  zoom: number;
+};
 
 const statusLabels: Record<string, string> = {
   pending: "未开始",
@@ -194,6 +201,34 @@ function selectedPlanStorageKey(goalId: number) {
   return `${SELECTED_PLAN_PREFIX}${goalId}`;
 }
 
+function readerProgressStorageKey(goalId: number) {
+  return `${READER_PROGRESS_PREFIX}${goalId}`;
+}
+
+function readStoredReaderProgress(goalId: number): ReaderProgress | null {
+  try {
+    const raw = window.localStorage.getItem(readerProgressStorageKey(goalId));
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<ReaderProgress>;
+    if (
+      typeof parsed.materialId !== "number" ||
+      typeof parsed.page !== "number" ||
+      typeof parsed.zoom !== "number"
+    ) {
+      return null;
+    }
+    return {
+      materialId: parsed.materialId,
+      page: Math.max(1, Math.round(parsed.page)),
+      zoom: Math.max(60, Math.min(180, Math.round(parsed.zoom)))
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [goalSummaries, setGoalSummaries] = useState<GoalSummary[]>([]);
   const [goal, setGoal] = useState<GoalDetail | null>(null);
@@ -282,15 +317,35 @@ export default function Home() {
     if (activeView !== "reader") {
       return;
     }
-    if (readerMaterialId && !pdfMaterials.some((item) => item.id === readerMaterialId)) {
-      setReaderMaterialId(pdfMaterials[0]?.id ?? null);
+    if (!goal || pdfMaterials.length === 0) {
+      setReaderMaterialId(null);
       setPdfPage(1);
       return;
     }
-    if (!readerMaterialId && pdfMaterials.length > 0) {
-      setReaderMaterialId(pdfMaterials[0].id);
+    if (readerMaterialId && !pdfMaterials.some((item) => item.id === readerMaterialId)) {
+      const stored = readStoredReaderProgress(goal.id);
+      const restored = stored
+        ? pdfMaterials.find((item) => item.id === stored.materialId)
+        : null;
+      setReaderMaterialId(restored?.id ?? pdfMaterials[0].id);
+      setPdfPage(stored && restored ? stored.page : 1);
+      if (stored && restored) {
+        setPdfZoom(stored.zoom);
+      }
+      return;
     }
-  }, [activeView, pdfMaterials, readerMaterialId]);
+    if (!readerMaterialId) {
+      const stored = readStoredReaderProgress(goal.id);
+      const restored = stored
+        ? pdfMaterials.find((item) => item.id === stored.materialId)
+        : null;
+      setReaderMaterialId(restored?.id ?? pdfMaterials[0].id);
+      setPdfPage(stored && restored ? stored.page : 1);
+      if (stored && restored) {
+        setPdfZoom(stored.zoom);
+      }
+    }
+  }, [activeView, goal, pdfMaterials, readerMaterialId]);
 
   useEffect(() => {
     if (!readerMaterialId) {
@@ -359,6 +414,24 @@ export default function Home() {
       cancelled = true;
     };
   }, [pdfMeta, pdfPage, readerMaterialId]);
+
+  useEffect(() => {
+    if (!goal || !readerMaterialId || pdfMaterials.length === 0) {
+      return;
+    }
+    if (!pdfMaterials.some((item) => item.id === readerMaterialId)) {
+      return;
+    }
+    const safePage = Math.max(1, Math.min(pdfPage, pdfMeta?.page_count ?? pdfPage));
+    window.localStorage.setItem(
+      readerProgressStorageKey(goal.id),
+      JSON.stringify({
+        materialId: readerMaterialId,
+        page: safePage,
+        zoom: pdfZoom
+      } satisfies ReaderProgress)
+    );
+  }, [goal, pdfMaterials, pdfMeta?.page_count, pdfPage, pdfZoom, readerMaterialId]);
 
   async function run<T>(
     step: string,
@@ -473,6 +546,11 @@ export default function Home() {
       setReview(null);
       setAdjustment(null);
       setSelectedFiles([]);
+      setReaderMaterialId(null);
+      setPdfPage(1);
+      setPdfMeta(null);
+      setPdfText(null);
+      setPdfTranslation(null);
       window.localStorage.setItem(LAST_GOAL_ID_KEY, String(goalId));
 
       const nextMaterials = await api.listMaterials(goalId);
@@ -517,6 +595,7 @@ export default function Home() {
     try {
       await api.deleteGoal(goalId);
       window.localStorage.removeItem(selectedPlanStorageKey(goalId));
+      window.localStorage.removeItem(readerProgressStorageKey(goalId));
       if (goal?.id === goalId) {
         window.localStorage.removeItem(LAST_GOAL_ID_KEY);
         setGoal(null);

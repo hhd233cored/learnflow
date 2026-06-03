@@ -451,6 +451,16 @@ export const api = {
     return response.body.getReader();
   },
 
+  compressChat(payload: { messages: ChatMessage[]; target_chars?: number }) {
+    return request<{ message: ChatMessage; compressed: boolean; original_chars: number }>(
+      "/chat/compress",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }
+    );
+  },
+
   getPdfMeta(materialId: number) {
     return request<PdfMeta>(`/materials/${materialId}/pdf/meta`);
   },
