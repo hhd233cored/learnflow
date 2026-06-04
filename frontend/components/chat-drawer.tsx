@@ -150,6 +150,9 @@ export function ChatDrawer({
   const [knowledgeMaterials, setKnowledgeMaterials] = useState<CourseMaterial[]>([]);
   const [knowledgeQuery, setKnowledgeQuery] = useState("");
   const [knowledgeHits, setKnowledgeHits] = useState<KnowledgeSearchHit[]>([]);
+  const [knowledgeSearchFeedback, setKnowledgeSearchFeedback] = useState<string | null>(
+    null
+  );
   const [selectedMaterialId, setSelectedMaterialId] = useState<number | null>(null);
   const [manualSourceName, setManualSourceName] = useState("手动补充");
   const [manualContent, setManualContent] = useState("");
@@ -422,6 +425,19 @@ export function ChatDrawer({
   }, [currentMaterials, goal?.id, knowledgeGoalId]);
 
   useEffect(() => {
+    if (
+      selectedMaterialId &&
+      !knowledgeMaterials.some(
+        (material) => material.id === selectedMaterialId && isSearchableMaterial(material)
+      )
+    ) {
+      setSelectedMaterialId(null);
+      setKnowledgeHits([]);
+      setKnowledgeSearchFeedback(null);
+    }
+  }, [knowledgeMaterials, selectedMaterialId]);
+
+  useEffect(() => {
     if (activePanel !== "chat") {
       return;
     }
@@ -582,7 +598,25 @@ export function ChatDrawer({
     setKnowledgePlanId(null);
     setSelectedMaterialId(null);
     setKnowledgeHits([]);
+    setKnowledgeSearchFeedback(null);
     setKnowledgeError(null);
+  }
+
+  function handleKnowledgePlanChange(planId: number | null) {
+    setKnowledgePlanId(planId);
+    setKnowledgeHits([]);
+    setKnowledgeSearchFeedback(null);
+  }
+
+  function handleKnowledgeMaterialChange(materialId: number | null) {
+    setSelectedMaterialId(materialId);
+    setKnowledgeHits([]);
+    setKnowledgeSearchFeedback(null);
+  }
+
+  function handleKnowledgeQueryChange(query: string) {
+    setKnowledgeQuery(query);
+    setKnowledgeSearchFeedback(null);
   }
 
   async function refreshKnowledgeMaterials(goalId = knowledgeGoalId) {
@@ -606,6 +640,7 @@ export function ChatDrawer({
       await api.deleteMaterial(materialId);
       setSelectedMaterialId((current) => (current === materialId ? null : current));
       setKnowledgeHits([]);
+      setKnowledgeSearchFeedback(null);
       await refreshKnowledgeMaterials(knowledgeGoalId);
     } catch (error) {
       setKnowledgeError(`素材删除失败：${errorMessage(error)}`);
@@ -684,22 +719,66 @@ export function ChatDrawer({
   }
 
   async function searchKnowledge() {
-    if (!knowledgeGoalId || !knowledgeQuery.trim()) {
+    const query = knowledgeQuery.trim();
+    if (!knowledgeGoalId || !query) {
       return;
     }
 
     setSearchingKnowledge(true);
     setKnowledgeError(null);
+    setKnowledgeSearchFeedback(null);
     try {
+      const selectedMaterial = selectedMaterialId
+        ? knowledgeMaterials.find((material) => material.id === selectedMaterialId)
+        : null;
+      if (selectedMaterial && !isSearchableMaterial(selectedMaterial)) {
+        setKnowledgeHits([]);
+        setKnowledgeSearchFeedback(
+          "当前选中的素材还没有写入 RAG 知识库，请先选择已建库素材，或取消素材筛选。"
+        );
+        return;
+      }
+
+      const filters = knowledgeFilters(activeKnowledgePlan, selectedMaterialId);
       const result = await api.searchKnowledge(
         knowledgeGoalId,
-        knowledgeQuery.trim(),
+        query,
         5,
-        knowledgeFilters(activeKnowledgePlan, selectedMaterialId)
+        filters
       );
-      setKnowledgeHits(result.hits);
+      let hits = result.hits;
+      let feedback: string | null = null;
+
+      if (hits.length === 0 && activeKnowledgePlan) {
+        const fallbackFilters = selectedMaterialId
+          ? { material_id: selectedMaterialId }
+          : {};
+        const fallbackResult = await api.searchKnowledge(
+          knowledgeGoalId,
+          query,
+          5,
+          fallbackFilters
+        );
+        if (fallbackResult.hits.length > 0) {
+          hits = fallbackResult.hits;
+          feedback = selectedMaterialId
+            ? `Day ${activeKnowledgePlan.day_index} 没有命中，已展示该素材内的全局结果。`
+            : `Day ${activeKnowledgePlan.day_index} 没有命中，已展示知识库全局结果。`;
+        }
+      }
+
+      if (hits.length === 0) {
+        feedback = activeKnowledgePlan
+          ? `没有找到与“${query}”相关的片段。可以取消 Day 或素材筛选后再试。`
+          : `没有找到与“${query}”相关的片段。`;
+      }
+
+      setKnowledgeHits(hits);
+      setKnowledgeSearchFeedback(feedback ?? `找到 ${hits.length} 条相关片段。`);
     } catch (err) {
       setKnowledgeError(err instanceof Error ? err.message : "知识库检索失败");
+      setKnowledgeHits([]);
+      setKnowledgeSearchFeedback(null);
     } finally {
       setSearchingKnowledge(false);
     }
@@ -842,13 +921,14 @@ export function ChatDrawer({
             onDeleteMaterial={(materialId) => void deleteKnowledgeMaterial(materialId)}
             onManualContentChange={setManualContent}
             onManualSourceNameChange={setManualSourceName}
-            onMaterialChange={setSelectedMaterialId}
-            onPlanChange={setKnowledgePlanId}
-            onQueryChange={setKnowledgeQuery}
+            onMaterialChange={handleKnowledgeMaterialChange}
+            onPlanChange={handleKnowledgePlanChange}
+            onQueryChange={handleKnowledgeQueryChange}
             onSearch={() => void searchKnowledge()}
             onUpload={uploadKnowledgeFile}
             plans={knowledgePlans}
             query={knowledgeQuery}
+            searchFeedback={knowledgeSearchFeedback}
             searching={searchingKnowledge}
             selectedMaterialId={selectedMaterialId}
             deletingMaterialId={deletingKnowledgeMaterialId}
@@ -1283,6 +1363,7 @@ function KnowledgePanel({
   onUpload,
   plans,
   query,
+  searchFeedback,
   searching,
   selectedMaterialId,
   uploading
@@ -1310,10 +1391,13 @@ function KnowledgePanel({
   onUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   plans: StudyPlan[];
   query: string;
+  searchFeedback: string | null;
   searching: boolean;
   selectedMaterialId: number | null;
   uploading: boolean;
 }) {
+  const searchableMaterials = materials.filter(isSearchableMaterial);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="space-y-4 border-b p-4">
@@ -1420,6 +1504,12 @@ function KnowledgePanel({
           <Input
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && goalId && query.trim() && !searching) {
+                event.preventDefault();
+                onSearch();
+              }
+            }}
             disabled={!goalId || searching}
             placeholder="输入关键词或问题..."
           />
@@ -1429,10 +1519,10 @@ function KnowledgePanel({
             onChange={(event) =>
               onMaterialChange(event.target.value ? Number(event.target.value) : null)
             }
-            disabled={!goalId || materials.length === 0}
+            disabled={!goalId || searchableMaterials.length === 0}
           >
             <option value="">全部素材</option>
-            {materials.map((material) => (
+            {searchableMaterials.map((material) => (
               <option key={material.id} value={material.id}>
                 {material.filename}
               </option>
@@ -1458,6 +1548,11 @@ function KnowledgePanel({
         {error ? (
           <div className="mb-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
             {error}
+          </div>
+        ) : null}
+        {searchFeedback ? (
+          <div className="mb-4 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+            {searchFeedback}
           </div>
         ) : null}
 
@@ -1486,7 +1581,9 @@ function KnowledgePanel({
           </div>
         ) : (
           <div className="rounded-md border border-dashed bg-background px-4 py-10 text-center text-sm text-muted-foreground">
-            {goalId
+            {searchFeedback
+              ? "可以换一个关键词，或取消 Day/素材筛选后再检索。"
+              : goalId
               ? "选择知识库、Day 或素材后输入关键词检索。"
               : "创建学习目标后，这里可以管理对应的 RAG 知识库。"}
           </div>
@@ -1656,6 +1753,10 @@ function knowledgeFilters(plan: StudyPlan | null, materialId: number | null) {
     ...(plan ? { plan_id: plan.id, day_index: plan.day_index } : {}),
     ...(materialId ? { material_id: materialId } : {})
   };
+}
+
+function isSearchableMaterial(material: CourseMaterial) {
+  return material.parse_status === "ready" && material.chunk_count > 0;
 }
 
 function isAppTheme(value: unknown): value is AppTheme {
