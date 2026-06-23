@@ -1,10 +1,17 @@
+import logging
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import inspect, text
+
+# 强制 HuggingFace transformers 只读本地缓存，避免连接 Hub 超时
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from app.api.routes import router
 from app.core.config import get_settings
 from app.db.base import Base
+from app.db.schema import ensure_demo_schema_columns as ensure_demo_schema_columns_for_engine
 from app.db.session import engine
 
 # Import models before create_all so SQLAlchemy registers every table.
@@ -21,25 +28,7 @@ def ensure_demo_schema_columns() -> None:
     正式生产环境仍建议改为 Alembic migration。
     """
 
-    inspector = inspect(engine)
-    if not inspector.has_table("learning_goals"):
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("learning_goals")}
-    statements: list[str] = []
-    if "goal_type" not in existing_columns:
-        statements.append(
-            "ALTER TABLE learning_goals ADD COLUMN goal_type VARCHAR(20) DEFAULT 'exam' NOT NULL"
-        )
-    if "duration_days" not in existing_columns:
-        statements.append("ALTER TABLE learning_goals ADD COLUMN duration_days INTEGER")
-
-    if not statements:
-        return
-
-    with engine.begin() as connection:
-        for statement in statements:
-            connection.execute(text(statement))
+    ensure_demo_schema_columns_for_engine(engine)
 
 
 def create_app() -> FastAPI:
@@ -64,6 +53,11 @@ def create_app() -> FastAPI:
         这样本地开发更简单。正式生产环境应替换为 Alembic 迁移。
         """
 
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
         # MVP 阶段为了方便自动建表；生产版本应迁移到 Alembic。
         Base.metadata.create_all(bind=engine)
         ensure_demo_schema_columns()

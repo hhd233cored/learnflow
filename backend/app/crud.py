@@ -526,6 +526,7 @@ def replace_material_chunks(
     material: models.CourseMaterial,
     chunks: list[str],
     chroma_document_ids: list[str],
+    enrichments: list[dict] | None = None,
 ) -> models.CourseMaterial:
     """Chroma 建库成功后，替换数据库中的 chunk 元数据。
 
@@ -538,11 +539,16 @@ def replace_material_chunks(
     ).delete()
 
     for index, chunk in enumerate(chunks):
+        enrichment = enrichments[index] if enrichments and index < len(enrichments) else {}
         db.add(
             models.DocumentChunk(
                 material_id=material.id,
                 chunk_index=index,
                 content_preview=chunk[:500],
+                content_raw=str(enrichment.get("content_raw") or chunk),
+                retrieval_text=str(enrichment.get("retrieval_text") or chunk),
+                formulas=list(enrichment.get("formulas") or []),
+                key_terms=list(enrichment.get("key_terms") or []),
                 chroma_collection=material.chroma_collection,
                 chroma_document_id=chroma_document_ids[index],
             )

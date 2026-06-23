@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,9 @@ import httpx
 
 from app import models
 from app.core.config import get_settings
+
+
+_FILE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 @dataclass
@@ -60,6 +64,9 @@ def cached_ocr_pages(material: models.CourseMaterial) -> list[OcrPage]:
     pages_dir = ocr_cache_dir(material) / "pages"
     if not pages_dir.exists():
         return []
+    if not _cached_hash_matches(material):
+        _clear_ocr_cache(material)
+        return []
 
     pages: list[OcrPage] = []
     for path in sorted(pages_dir.glob("page_*.md")):
@@ -78,6 +85,9 @@ def cached_ocr_pages(material: models.CourseMaterial) -> list[OcrPage]:
 def cached_ocr_page_text(material: models.CourseMaterial, page_index: int) -> str | None:
     """读取某一页的 OCR Markdown；没有缓存时返回 None。"""
 
+    if not _cached_hash_matches(material):
+        _clear_ocr_cache(material)
+        return None
     page_path = _page_path(material, page_index)
     if not page_path.exists():
         return None
@@ -116,25 +126,36 @@ async def ensure_pdf_ocr_with_progress(
 
     cached_pages = cached_ocr_pages(material)
     if cached_pages:
-        settings = get_settings()
+        if _cached_hash_matches(material):
+            settings = get_settings()
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "ocr_cached",
+                        "message": f"OCR 缓存命中：{material.filename}",
+                        "current_file": material.filename,
+                        "current_page": len(cached_pages),
+                        "total_pages": len(cached_pages),
+                    }
+                )
+            return OcrResult(
+                material_id=material.id,
+                provider="paddleocr",
+                model=settings.paddle_ocr_model,
+                job_id=_read_cached_job_id(material),
+                pages=cached_pages,
+                cache_dir=ocr_cache_dir(material),
+            )
+        # 缓存文件的 SHA256 与当前 PDF 不匹配 → 缓存已过期，清除后重新提交
         if progress_callback is not None:
             progress_callback(
                 {
-                    "stage": "ocr_cached",
-                    "message": f"OCR 缓存命中：{material.filename}",
+                    "stage": "ocr_cache_stale",
+                    "message": f"OCR 缓存与当前文件不匹配，重新提交：{material.filename}",
                     "current_file": material.filename,
-                    "current_page": len(cached_pages),
-                    "total_pages": len(cached_pages),
                 }
             )
-        return OcrResult(
-            material_id=material.id,
-            provider="paddleocr",
-            model=settings.paddle_ocr_model,
-            job_id=_read_cached_job_id(material),
-            pages=cached_pages,
-            cache_dir=ocr_cache_dir(material),
-        )
+        _clear_ocr_cache(material)
 
     if not ocr_is_enabled():
         return None
@@ -334,6 +355,7 @@ async def _save_jsonl_result(
             "job_id": job_id,
             "state": "done",
             "page_count": len(pages),
+            "file_sha256": _hash_file(Path(material.storage_path)),
             "updated_at": datetime.utcnow().isoformat(),
         },
     )
@@ -407,12 +429,47 @@ def _read_cached_job_id(material: models.CourseMaterial) -> str | None:
     return job_id if isinstance(job_id, str) else None
 
 
+def _cached_hash_matches(material: models.CourseMaterial) -> bool:
+    """检查 OCR 缓存的 file_sha256 是否与当前 PDF 文件一致。"""
+    meta_path = ocr_cache_dir(material) / "meta.json"
+    if not meta_path.exists():
+        return False
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    cached_sha = payload.get("file_sha256")
+    if not isinstance(cached_sha, str) or not cached_sha:
+        return False
+    file_path = Path(material.storage_path)
+    if not file_path.exists() or not file_path.is_file():
+        return False
+    return _hash_file(file_path) == cached_sha
+
+
+def _clear_ocr_cache(material: models.CourseMaterial) -> None:
+    shutil.rmtree(ocr_cache_dir(material), ignore_errors=True)
+
+
 def _hash_file(path: Path) -> str:
+    try:
+        stat = path.stat()
+        cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+        cached = _FILE_HASH_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except OSError:
+        cache_key = None
     digest = hashlib.sha256()
     with path.open("rb") as file_obj:
         for block in iter(lambda: file_obj.read(1024 * 1024), b""):
             digest.update(block)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    if cache_key is not None:
+        if len(_FILE_HASH_CACHE) > 512:
+            _FILE_HASH_CACHE.clear()
+        _FILE_HASH_CACHE[cache_key] = value
+    return value
 
 
 def _safe_relative_image_name(name: str) -> Path:

@@ -365,9 +365,16 @@ async def regenerate_goal_plan(goal_id: int, db: Session = Depends(get_db)):
 def delete_goal(goal_id: int, db: Session = Depends(get_db)):
     """删除某个学习目标及其计划、任务、复盘和知识库 collection。"""
 
-    deleted = crud.delete_goal(db, goal_id)
-    if not deleted:
+    goal = db.get(models.LearningGoal, goal_id)
+    if goal is None:
         raise HTTPException(status_code=404, detail="Learning goal not found")
+
+    # 先清理该目标下所有素材的原始文件和 OCR 缓存，避免磁盘残留
+    for material in goal.materials:
+        delete_material_files(material)
+
+    db.delete(goal)
+    db.commit()
     ChromaKnowledgeBase().delete_goal_collection(goal_id)
     return None
 
@@ -925,7 +932,9 @@ async def _create_manual_knowledge_material(
             day_index=scope_day_index,
             source_type="manual",
         )
-        return crud.replace_material_chunks(db, material, chunks, chroma_ids)
+        return crud.replace_material_chunks(
+            db, material, chunks, chroma_ids, enriched_chunks
+        )
     except Exception as exc:
         return crud.mark_material_failed(db, material, str(exc))
 

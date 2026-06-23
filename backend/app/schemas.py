@@ -369,6 +369,9 @@ class KnowledgeSearchHit(BaseModel):
     content: str
     metadata: dict
     distance: float | None = None
+    rerank_score: float | None = None
+    lexical_score: float | None = None
+    retrieval_source: str | None = None
 
 
 class KnowledgeSearchResponse(BaseModel):

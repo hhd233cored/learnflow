@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrainCircuit,
   CalendarDays,
@@ -62,6 +62,8 @@ const USE_ASYNC_JOBS = process.env.NEXT_PUBLIC_USE_ASYNC_JOBS === "true";
 const LAST_GOAL_ID_KEY = "studyagent:lastGoalId";
 const SELECTED_PLAN_PREFIX = "studyagent:selectedPlanId:";
 const READER_PROGRESS_PREFIX = "studyagent:readerProgress:";
+const PDF_PAN_HOLD_MS = 220;
+const PDF_PAN_MOVE_PX = 6;
 
 type ReaderProgress = {
   materialId: number;
@@ -1577,10 +1579,26 @@ function PdfReaderView({
   const readable = Boolean(pageText?.readable);
   const [readerPanel, setReaderPanel] = useState<"materials" | "translation" | null>(null);
   const [pageInput, setPageInput] = useState(String(page));
+  const [isPanning, setIsPanning] = useState(false);
+  const pdfViewportRef = useRef<HTMLDivElement | null>(null);
+  const panStartRef = useRef({
+    pointerId: 0,
+    button: 0,
+    x: 0,
+    y: 0,
+    scrollLeft: 0,
+    scrollTop: 0,
+    startedAt: 0,
+    hasDragged: false
+  });
 
   useEffect(() => {
     setPageInput(String(page));
   }, [page]);
+
+  useEffect(() => {
+    setIsPanning(false);
+  }, [page, selectedMaterialId]);
 
   function movePage(offset: number) {
     onPageChange(Math.min(Math.max(page + offset, 1), pageCount));
@@ -1598,6 +1616,118 @@ function PdfReaderView({
   function toggleReaderPanel(panel: "materials" | "translation") {
     setReaderPanel((current) => (current === panel ? null : panel));
   }
+
+  function handlePdfPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (!selectedMaterialId || (event.button !== 0 && event.button !== 2)) {
+      return;
+    }
+    event.preventDefault();
+    const viewport = pdfViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    panStartRef.current = {
+      pointerId: event.pointerId,
+      button: event.button,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+      startedAt: window.performance.now(),
+      hasDragged: false
+    };
+    viewport.setPointerCapture(event.pointerId);
+    setIsPanning(false);
+  }
+
+  function handlePdfPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.pointerId !== panStartRef.current.pointerId) {
+      return;
+    }
+    const viewport = pdfViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const deltaX = event.clientX - panStartRef.current.x;
+    const deltaY = event.clientY - panStartRef.current.y;
+    const moved = Math.hypot(deltaX, deltaY);
+    const heldMs = window.performance.now() - panStartRef.current.startedAt;
+    if (!isPanning) {
+      const canStartPan =
+        panStartRef.current.button === 0 &&
+        (moved >= PDF_PAN_MOVE_PX || (heldMs >= PDF_PAN_HOLD_MS && moved > 0));
+      if (!canStartPan) {
+        return;
+      }
+      panStartRef.current.hasDragged = true;
+      setIsPanning(true);
+    }
+    viewport.scrollLeft =
+      panStartRef.current.scrollLeft - deltaX;
+    viewport.scrollTop =
+      panStartRef.current.scrollTop - deltaY;
+  }
+
+  function stopPdfPan(event?: React.PointerEvent<HTMLDivElement>, allowClick = true) {
+    const viewport = pdfViewportRef.current;
+    if (event && viewport?.hasPointerCapture(event.pointerId)) {
+      viewport.releasePointerCapture(event.pointerId);
+    }
+    if (allowClick && event && event.pointerId === panStartRef.current.pointerId) {
+      const heldMs = window.performance.now() - panStartRef.current.startedAt;
+      const wasDrag =
+        panStartRef.current.hasDragged || isPanning || heldMs >= PDF_PAN_HOLD_MS;
+      if (!wasDrag) {
+        if (panStartRef.current.button === 0) {
+          movePage(1);
+        } else if (panStartRef.current.button === 2) {
+          movePage(-1);
+        }
+      }
+    }
+    panStartRef.current.pointerId = 0;
+    setIsPanning(false);
+  }
+
+  function zoomPdfAtPoint(clientX: number, clientY: number, deltaY: number) {
+    if (!selectedMaterialId || !meta || deltaY === 0) {
+      return;
+    }
+    const viewport = pdfViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const nextZoom = Math.max(60, Math.min(180, zoom + (deltaY < 0 ? 10 : -10)));
+    if (nextZoom === zoom) {
+      return;
+    }
+    const rect = viewport.getBoundingClientRect();
+    const offsetX = clientX - rect.left;
+    const offsetY = clientY - rect.top;
+    const anchorX = viewport.scrollLeft + offsetX;
+    const anchorY = viewport.scrollTop + offsetY;
+    const ratioX = anchorX / Math.max(viewport.scrollWidth, 1);
+    const ratioY = anchorY / Math.max(viewport.scrollHeight, 1);
+    onZoomChange(nextZoom);
+    window.requestAnimationFrame(() => {
+      viewport.scrollLeft = ratioX * viewport.scrollWidth - offsetX;
+      viewport.scrollTop = ratioY * viewport.scrollHeight - offsetY;
+    });
+  }
+
+  useEffect(() => {
+    const viewport = pdfViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const handleNativeWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      zoomPdfAtPoint(event.clientX, event.clientY, event.deltaY);
+    };
+    viewport.addEventListener("wheel", handleNativeWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", handleNativeWheel);
+  }, [selectedMaterialId, meta, zoom, onZoomChange]);
 
   async function translateAndOpenPanel(mode: "text" | "ocr" = "text") {
     setReaderPanel("translation");
@@ -1741,23 +1871,36 @@ function PdfReaderView({
             </div>
           </div>
 
-          <div className="relative grid min-h-[900px] gap-3 overflow-hidden xl:grid-cols-[minmax(0,1fr)_48px]">
+          <div className="relative grid h-[calc(100vh-260px)] min-h-[620px] max-h-[900px] gap-3 overflow-hidden xl:grid-cols-[minmax(0,1fr)_48px]">
             {selectedMaterialId && meta ? (
-              <div className="min-h-[820px] overflow-auto rounded-md border bg-slate-100 p-4">
+              <div
+                ref={pdfViewportRef}
+                className={cn(
+                  "pdf-reader-viewport h-full min-h-0 overflow-auto overscroll-contain rounded-md border bg-slate-100 p-4 select-none",
+                  isPanning ? "cursor-grabbing" : "cursor-grab"
+                )}
+                onPointerDown={handlePdfPointerDown}
+                onPointerMove={handlePdfPointerMove}
+                onPointerUp={stopPdfPan}
+                onPointerCancel={(event) => stopPdfPan(event, false)}
+                onContextMenu={(event) => event.preventDefault()}
+              >
                 <img
                   alt={`${meta.filename} 第 ${page} 页`}
                   className="mx-auto max-w-none rounded-sm border bg-white shadow-sm"
+                  draggable={false}
+                  onDragStart={(event) => event.preventDefault()}
                   src={api.pdfPageImageUrl(selectedMaterialId, page)}
                   style={{ width: `${zoom}%` }}
                 />
               </div>
             ) : (
-              <div className="min-h-[820px]">
+              <div className="h-full min-h-0">
                 <EmptyState text="选择一个 PDF 资料后会显示阅读器。" />
               </div>
             )}
 
-            <div className="flex min-h-[820px] flex-col items-center gap-2 rounded-md border bg-background p-2">
+            <div className="flex h-full min-h-0 flex-col items-center gap-2 rounded-md border bg-background p-2">
               <Button
                 size="icon"
                 variant={readerPanel === "materials" ? "default" : "ghost"}

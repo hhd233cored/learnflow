@@ -147,6 +147,9 @@ export type KnowledgeSearchHit = {
   content: string;
   metadata: Record<string, unknown>;
   distance?: number | null;
+  rerank_score?: number | null;
+  lexical_score?: number | null;
+  retrieval_source?: string | null;
 };
 
 export type KnowledgeSearchFilters = {

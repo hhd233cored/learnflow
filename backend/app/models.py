@@ -210,6 +210,14 @@ class DocumentChunk(TimestampMixin, Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content_preview: Mapped[str] = mapped_column(Text, nullable=False)
+    content_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retrieval_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    formulas: Mapped[list[str] | None] = mapped_column(
+        MutableList.as_mutable(json_column()), nullable=True, default=list
+    )
+    key_terms: Mapped[list[dict] | None] = mapped_column(
+        MutableList.as_mutable(json_column()), nullable=True, default=list
+    )
     chroma_collection: Mapped[str] = mapped_column(String(120), nullable=False)
     chroma_document_id: Mapped[str] = mapped_column(String(120), nullable=False)
 

@@ -5,6 +5,17 @@ param(
     [string]$DeepSeekApiKey = "",
     [string]$DeepSeekModel = "deepseek-v4-flash",
     [string]$PaddleOcrToken = "",
+    [string]$EmbeddingProvider = "hash",
+    [string]$EmbeddingModel = "BAAI/bge-m3",
+    [string]$EmbeddingDevice = "auto",
+    [int]$EmbeddingBatchSize = 12,
+    [switch]$EmbeddingUseFp16,
+    [string]$RerankerProvider = "none",
+    [string]$RerankerModel = "BAAI/bge-reranker-v2-m3",
+    [string]$RerankerDevice = "auto",
+    [int]$RerankerBatchSize = 8,
+    [int]$RerankerCandidateCount = 30,
+    [switch]$RerankerUseFp16,
     [switch]$EnableOcr,
     [switch]$UseAsyncJobs,
     [switch]$Force
@@ -52,6 +63,8 @@ else {
     "none"
 }
 $UseAsyncJobsValue = if ($UseAsyncJobs) { "true" } else { "false" }
+$EmbeddingUseFp16Value = if ($EmbeddingUseFp16) { "true" } else { "false" }
+$RerankerUseFp16Value = if ($RerankerUseFp16) { "true" } else { "false" }
 
 Write-Step "Create local storage directories"
 New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\materials") | Out-Null
@@ -78,6 +91,17 @@ OCR_STORAGE_DIR=./storage/ocr
 CORS_ORIGINS=$CorsOrigins
 MATERIAL_UPLOAD_DIR=./storage/materials
 CHROMA_PERSIST_DIR=./storage/chroma
+EMBEDDING_PROVIDER=$EmbeddingProvider
+EMBEDDING_MODEL=$EmbeddingModel
+EMBEDDING_DEVICE=$EmbeddingDevice
+EMBEDDING_BATCH_SIZE=$EmbeddingBatchSize
+EMBEDDING_USE_FP16=$EmbeddingUseFp16Value
+RERANKER_PROVIDER=$RerankerProvider
+RERANKER_MODEL=$RerankerModel
+RERANKER_DEVICE=$RerankerDevice
+RERANKER_BATCH_SIZE=$RerankerBatchSize
+RERANKER_USE_FP16=$RerankerUseFp16Value
+RERANKER_CANDIDATE_COUNT=$RerankerCandidateCount
 CHUNK_SIZE=800
 CHUNK_OVERLAP=120
 RAG_ENRICH_MAX_CHUNKS=12

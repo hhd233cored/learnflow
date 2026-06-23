@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from app import crud, models
@@ -8,6 +9,8 @@ from app.agents import workflow
 from app.db.session import SessionLocal
 from app.schemas import GoalCreate
 from app.services.material_pipeline import build_material_knowledge_base
+
+logger = logging.getLogger(__name__)
 from app.services.planning_context import knowledge_context_for_goal
 
 
@@ -107,6 +110,9 @@ async def run_goal_with_materials_job(
                     },
                 )
             except Exception as exc:
+                logger.exception(
+                    "[%s] 资料建库异常", material.filename
+                )
                 crud.mark_material_failed(db, material, str(exc))
                 failed_materials.append(
                     {"filename": material.filename, "error": str(exc)[:500]}
@@ -181,6 +187,7 @@ async def run_goal_with_materials_job(
             },
         )
     except Exception as exc:
+        logger.exception("后台建库任务整体异常 (goal_id=%s)", goal_id)
         job = crud.get_job(db, job_id)
         if job is not None:
             crud.mark_job_failed(db, job, str(exc))

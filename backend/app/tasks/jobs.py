@@ -4,6 +4,7 @@ import asyncio
 
 from app import crud
 from app.db.base import Base
+from app.db.schema import ensure_demo_schema_columns
 from app.db.session import SessionLocal, engine
 from app.services.material_pipeline import build_material_knowledge_base
 from app.services.plan_pipeline import generate_and_store_goal_plan
@@ -19,6 +20,7 @@ def _ensure_tables() -> None:
     """
 
     Base.metadata.create_all(bind=engine)
+    ensure_demo_schema_columns(engine)
 
 
 @celery_app.task(name="studyagent.parse_material")

@@ -1,0 +1,5 @@
+# Optional dependencies for HuggingFace Inference API embedding (EMBEDDING_PROVIDER=hf-api).
+# `httpx` is already a hard dependency (via chromadb), so only huggingface_hub is listed here.
+# If huggingface_hub is not installed, the code falls back to raw HTTP (httpx) automatically.
+-r requirements.txt
+huggingface_hub>=0.24.0

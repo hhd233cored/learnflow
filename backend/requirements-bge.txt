@@ -1,0 +1,4 @@
+# Optional dependencies for BAAI/bge-m3 embedding and BGE reranker.
+# Install this file when EMBEDDING_PROVIDER=bge-m3 or RERANKER_PROVIDER=bge.
+-r requirements.txt
+FlagEmbedding>=1.2.10

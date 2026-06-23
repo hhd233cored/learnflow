@@ -51,6 +51,7 @@ DATABASE_URL=sqlite:///./studyagent.db
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
 NEXT_PUBLIC_USE_ASYNC_JOBS=false
 OCR_PROVIDER=none
+EMBEDDING_PROVIDER=hash
 ```
 
 如果已经存在 `backend/.env` 或 `frontend/.env.local`，脚本默认不会覆盖。需要重建时使用：
@@ -61,7 +62,7 @@ OCR_PROVIDER=none
 
 ### 3. 配置 DeepSeek
 
-相关API Key在https://platform.deepseek.com/usage获取
+相关API Key在 https://platform.deepseek.com/usage 获取
 如果要启用真实 AI 生成能力，可以在初始化时写入 Key：
 
 ```powershell
@@ -80,7 +81,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 
 ### 4. 配置 PaddleOCR
 
-相关Token在https://aistudio.baidu.com/paddleocr获取
+相关Token在 https://aistudio.baidu.com/paddleocr 获取
 如果要让 PDF 建库时自动 OCR，或者在 PDF 阅读器中手动识别整份 PDF，可以启用 PaddleOCR：
 
 ```powershell
@@ -103,7 +104,68 @@ OCR_STORAGE_DIR=./storage/ocr
 OCR_PROVIDER=none
 ```
 
-### 5. 配置前端
+### 5. 配置 BGE-M3 Embedding 和 Reranker
+
+默认 embedding 使用轻量 `hash` 模式，reranker 默认关闭，适合快速 Demo。如果要提升 RAG 检索质量，可以切换到 `BAAI/bge-m3`，并启用 BGE reranker。
+
+先安装可选依赖：
+
+```powershell
+cd backend
+.\.venv\Scripts\activate
+pip install -r requirements-bge.txt
+```
+
+如果还没有创建环境文件，可以直接生成：
+
+```powershell
+.\setup-env.bat -EmbeddingProvider bge-m3 -RerankerProvider bge
+```
+
+如果已经有 `backend/.env`，建议手动修改下面几项，避免覆盖已有的 DeepSeek/PaddleOCR Key：
+
+```env
+EMBEDDING_PROVIDER=bge-m3
+EMBEDDING_MODEL=BAAI/bge-m3
+EMBEDDING_DEVICE=auto
+EMBEDDING_BATCH_SIZE=12
+EMBEDDING_USE_FP16=false
+
+RERANKER_PROVIDER=bge
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+RERANKER_DEVICE=auto
+RERANKER_BATCH_SIZE=8
+RERANKER_USE_FP16=false
+RERANKER_CANDIDATE_COUNT=30
+```
+
+如果本机有合适的 NVIDIA GPU，可以按需改成：
+
+```env
+EMBEDDING_DEVICE=cuda
+EMBEDDING_USE_FP16=true
+RERANKER_DEVICE=cuda
+RERANKER_USE_FP16=true
+```
+
+启用 reranker 后，检索流程会先从 Chroma 召回 `RERANKER_CANDIDATE_COUNT` 条候选，再重排返回前几条。切换 embedding 后，已有 Chroma 向量需要重建；只启用或关闭 reranker 不需要重建向量。
+
+### 5.1 使用 HuggingFace API 远程调用 BGE-M3（可选）
+
+如果本地没有 GPU 或不想下载模型权重，可以通过 HuggingFace Inference API 远程调用 bge-m3。先获取 [HuggingFace Token](https://huggingface.co/settings/tokens)，然后在 `backend/.env` 中配置：
+
+```env
+EMBEDDING_PROVIDER=hf-api
+HF_TOKEN=hf_你的API密钥
+```
+
+可选安装 SDK 以获得更好的错误提示（不安装会自动 fallback 到 HTTP）：
+
+```powershell
+pip install -r backend/requirements-hf-api.txt
+```
+
+### 6. 配置前端
 
 前端只读取 `frontend/.env.local`：
 
@@ -120,7 +182,7 @@ NEXT_PUBLIC_USE_ASYNC_JOBS=false
 
 修改前端环境变量后，需要重启前端开发服务。
 
-### 6. 安装依赖
+### 7. 安装依赖
 
 第一次运行建议执行：
 
@@ -144,7 +206,7 @@ cd frontend
 npm install
 ```
 
-### 7. 启动本地 Demo
+### 8. 启动本地 Demo
 
 推荐使用：
 
@@ -175,7 +237,7 @@ cd frontend
 npm.cmd run dev
 ```
 
-### 8. 启用 Celery 异步队列（本地启动则不需要）
+### 9. 启用 Celery 异步队列（本地启动则不需要）
 
 本地 Demo 默认不需要 Redis/Celery。如果要测试真实异步队列：
 
@@ -196,7 +258,7 @@ celery -A app.tasks.celery_app.celery_app worker --loglevel=info --pool=solo
 
 Windows 本地建议使用 `--pool=solo`。
 
-### 9. Docker Compose 配置（本地启动则不需要）
+### 10. Docker Compose 配置（本地启动则不需要）
 
 Docker 模式读取项目根目录的 `.env`。可以从模板复制：
 
@@ -244,7 +306,10 @@ DATABASE_URL=sqlite:///./studyagent.db
 
 ### Agent 与 RAG
 
+- DeepSeek API
 - LangGraph
 - Chroma
+- BAAI/bge-m3
+- BAAI/bge-reranker-v2-m3
 - PyMuPDF / python-docx / python-pptx
 - PaddleOCR

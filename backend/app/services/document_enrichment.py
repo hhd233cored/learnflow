@@ -9,19 +9,32 @@ from app.core.config import get_settings
 
 LATEX_COMMAND_WORDS = {
     "begin",
+    "binom",
     "cdot",
+    "cos",
+    "cot",
+    "csc",
+    "det",
     "displaystyle",
     "dfrac",
+    "end",
+    "exp",
     "frac",
     "hline",
     "left",
+    "max",
+    "min",
     "mathrm",
     "qquad",
     "quad",
     "right",
+    "sec",
+    "sin",
+    "tan",
     "text",
     "times",
     "to",
+    "vec",
 }
 
 LATEX_COMMAND_REPLACEMENTS = {
@@ -75,13 +88,21 @@ TERM_STOPWORDS = {
 }
 
 FORMULA_TERM_STOPWORDS = {
+    "derivative",
     "dx",
     "dy",
     "dz",
     "fraction",
+    "gradient",
+    "integral",
+    "limit",
     "over",
+    "partial",
     "power",
+    "root",
+    "square",
     "subscript",
+    "summation",
     "superscript",
 }
 
@@ -95,7 +116,10 @@ class EnrichedChunk(TypedDict):
     """
 
     content: str
+    content_raw: str
+    retrieval_text: str
     embedding_text: str
+    formulas: list[str]
     source_lang: str
     summary_zh: str
     key_terms: list[dict[str, str]]
@@ -113,6 +137,7 @@ async def enrich_chunks(chunks: list[str], filename: str) -> list[EnrichedChunk]
     enriched: list[EnrichedChunk] = []
 
     for index, chunk in enumerate(chunks):
+        formulas = extract_formulas(chunk)
         retrieval_text = clean_text_for_retrieval(chunk)
         fallback = _fallback_enrichment(retrieval_text)
 
@@ -138,9 +163,13 @@ async def enrich_chunks(chunks: list[str], filename: str) -> list[EnrichedChunk]
                 },
                 fallback=fallback,
             )
-            normalized = _normalize_enrichment(chunk, retrieval_text, result, fallback)
+            normalized = _normalize_enrichment(
+                chunk, retrieval_text, formulas, result, fallback
+            )
         else:
-            normalized = _normalize_enrichment(chunk, retrieval_text, fallback, fallback)
+            normalized = _normalize_enrichment(
+                chunk, retrieval_text, formulas, fallback, fallback
+            )
 
         enriched.append(normalized)
 
@@ -167,7 +196,11 @@ def _fallback_enrichment(content: str) -> dict[str, Any]:
 
 
 def _normalize_enrichment(
-    content: str, retrieval_text: str, raw: dict[str, Any], fallback: dict[str, Any]
+    content: str,
+    retrieval_text: str,
+    formulas: list[str],
+    raw: dict[str, Any],
+    fallback: dict[str, Any],
 ) -> EnrichedChunk:
     """校验模型输出，并生成最终写入 Chroma 的增强文本。"""
 
@@ -179,11 +212,13 @@ def _normalize_enrichment(
         for item in key_terms
         if item.get("source") or item.get("zh")
     ]
+    formula_line = "Formulae: " + " ; ".join(formulas[:5]) if formulas else ""
 
     embedding_text = "\n".join(
         item
         for item in [
             retrieval_text or content,
+            formula_line,
             f"中文摘要：{summary_zh}" if summary_zh else "",
             "核心术语：" + "；".join(term_lines) if term_lines else "",
         ]
@@ -192,7 +227,10 @@ def _normalize_enrichment(
 
     return {
         "content": content,
+        "content_raw": content,
+        "retrieval_text": retrieval_text,
         "embedding_text": embedding_text,
+        "formulas": formulas,
         "source_lang": source_lang,
         "summary_zh": summary_zh,
         "key_terms": key_terms,
@@ -274,6 +312,55 @@ def _normalize_terms(value: Any, fallback: list[dict[str, str]]) -> list[dict[st
     ]
 
 
+def extract_formulas(text: str) -> list[str]:
+    """Extract LaTeX/math-looking expressions for exact formula retrieval."""
+
+    candidates: list[str] = []
+    patterns = [
+        r"\$\$.*?\$\$",
+        r"\\\[.*?\\\]",
+        r"\\\(.*?\\\)",
+        r"\$[^$\n]{2,400}\$",
+    ]
+    for pattern in patterns:
+        candidates.extend(match.group(0) for match in re.finditer(pattern, text, re.S))
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if _looks_like_formula_line(stripped):
+            candidates.append(stripped)
+
+    formulas: list[str] = []
+    for candidate in candidates:
+        formula = _normalize_formula(candidate)
+        if not formula or formula in formulas:
+            continue
+        formulas.append(formula)
+        if len(formulas) >= 12:
+            break
+    return formulas
+
+
+def _looks_like_formula_line(line: str) -> bool:
+    if len(line) < 3 or len(line) > 500:
+        return False
+    if re.search(r"\\(?:frac|int|sum|lim|sqrt|begin|partial|nabla)", line):
+        return True
+    math_symbols = len(re.findall(r"[=^_+\-*/<>∫Σ√∞≤≥]", line))
+    alpha_or_digit = len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]", line))
+    return math_symbols >= 2 and alpha_or_digit >= 2
+
+
+def _normalize_formula(value: str) -> str:
+    formula = value.strip()
+    formula = re.sub(r"^\$\$|\$\$$", "", formula).strip()
+    formula = re.sub(r"^\$|\$$", "", formula).strip()
+    formula = re.sub(r"^\\\(|\\\)$", "", formula).strip()
+    formula = re.sub(r"^\\\[|\\\]$", "", formula).strip()
+    formula = re.sub(r"\s+", " ", formula)
+    return formula[:500]
+
+
 def clean_text_for_retrieval(text: str) -> str:
     """为检索和术语抽取清洗 LaTeX 排版噪声，保留公式语义提示。"""
 
@@ -328,6 +415,8 @@ def is_valid_key_term(term: str) -> bool:
     if "\\" in cleaned or any(char in cleaned for char in "{}^_"):
         return False
     if re.fullmatch(r"[A-Za-z]", cleaned):
+        return False
+    if re.fullmatch(r"(?:[A-Za-z]\s*){2,5}", cleaned):
         return False
     if re.fullmatch(r"[\d\s.,:/+-]+", cleaned):
         return False

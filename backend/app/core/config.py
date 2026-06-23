@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 from functools import lru_cache
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,12 +29,32 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     material_upload_dir: str = "./storage/materials"
     chroma_persist_dir: str = "./storage/chroma"
+    embedding_provider: str = "hash"
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_device: str = "auto"
+    embedding_batch_size: int = 12
+    embedding_use_fp16: bool = False
+    reranker_provider: str = "none"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_device: str = "auto"
+    reranker_batch_size: int = 8
+    reranker_use_fp16: bool = False
+    reranker_candidate_count: int = 30
+    rag_hybrid_search_enabled: bool = False
+    rag_lexical_candidate_count: int = 30
     chunk_size: int = 800
     chunk_overlap: int = 120
     rag_enrich_max_chunks: int = 12
+    hf_api_token: str = Field(
+        default="",
+        alias="HF_TOKEN",
+        description="HuggingFace API token，EMBEDDING_PROVIDER=hf-api 时需要",
+    )
 
     # 本地启动脚本会先切到 backend/，因此这里使用相对路径读取 backend/.env。
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", populate_by_name=True
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

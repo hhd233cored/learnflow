@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import chromadb
+from sqlalchemy import select
 
+from app import models
 from app.core.config import get_settings
-from app.services.embeddings import HashEmbeddingFunction
+from app.db.session import SessionLocal
+from app.services.embeddings import get_embedding_function
+from app.services.query_rewrite import QueryPlan, formula_tokens, rewrite_query, tokenize_for_lexical
+from app.services.rerankers import get_reranker
+
+
+_LEXICAL_TOKEN_CACHE: dict[tuple[int, str], list[str]] = {}
 
 
 def collection_name_for_goal(goal_id: int) -> str:
@@ -25,7 +35,27 @@ class ChromaKnowledgeBase:
         settings = get_settings()
         Path(settings.chroma_persist_dir).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
-        self.embedding_function = HashEmbeddingFunction()
+        self.embedding_function = get_embedding_function(
+            settings.embedding_provider,
+            settings.embedding_model,
+            settings.embedding_device,
+            settings.embedding_batch_size,
+            settings.embedding_use_fp16,
+            settings.hf_api_token,
+        )
+        self.reranker = get_reranker(
+            settings.reranker_provider,
+            settings.reranker_model,
+            settings.reranker_device,
+            settings.reranker_batch_size,
+            settings.reranker_use_fp16,
+        )
+        self.reranker_candidate_count = max(
+            settings.reranker_candidate_count,
+            1,
+        )
+        self.hybrid_search_enabled = settings.rag_hybrid_search_enabled
+        self.lexical_candidate_count = max(settings.rag_lexical_candidate_count, 1)
 
     def upsert_chunks(
         self,
@@ -97,9 +127,14 @@ class ChromaKnowledgeBase:
             embedding_function=self.embedding_function,
             metadata={"hnsw:space": "cosine"},
         )
+        query_plan = rewrite_query(query)
+        candidate_count = max(top_k, self.reranker_candidate_count)
+        if self.hybrid_search_enabled:
+            candidate_count = max(candidate_count, self.lexical_candidate_count)
+        n_results = candidate_count if self.reranker or self.hybrid_search_enabled else top_k
         query_args: dict[str, Any] = {
-            "query_texts": [query],
-            "n_results": top_k,
+            "query_texts": [query_plan.semantic_query],
+            "n_results": n_results,
             "include": ["documents", "metadatas", "distances"],
         }
         where_filter = _where_filter(
@@ -124,9 +159,26 @@ class ChromaKnowledgeBase:
                     "content": document,
                     "metadata": _decode_metadata(metadata),
                     "distance": distances[index] if index < len(distances) else None,
+                    "retrieval_source": "dense",
                 }
             )
-        return hits
+        if self.hybrid_search_enabled:
+            hits = _merge_hits(
+                hits,
+                _lexical_hits(
+                    goal_id=goal_id,
+                    query_plan=query_plan,
+                    limit=self.lexical_candidate_count,
+                    material_id=material_id,
+                    plan_id=plan_id,
+                    day_index=day_index,
+                    source_type=source_type,
+                ),
+            )
+        if self.reranker:
+            return self.reranker.rerank(query_plan.semantic_query, hits, top_k)
+        hits.sort(key=_hybrid_sort_score, reverse=True)
+        return hits[:top_k]
 
     def delete_goal_collection(self, goal_id: int) -> None:
         """删除某个学习目标对应的 Chroma collection。"""
@@ -147,6 +199,186 @@ class ChromaKnowledgeBase:
             collection.delete(where={"material_id": material_id})
         except Exception:
             return
+
+
+def _lexical_hits(
+    goal_id: int,
+    query_plan: QueryPlan,
+    limit: int,
+    material_id: int | None = None,
+    plan_id: int | None = None,
+    day_index: int | None = None,
+    source_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return lightweight lexical candidates from persisted chunk text."""
+
+    if plan_id is not None or day_index is not None or source_type:
+        return []
+    terms = query_plan.lexical_terms
+    formula_terms_set = set(query_plan.formula_terms)
+    if not terms and not formula_terms_set:
+        return []
+
+    db = SessionLocal()
+    try:
+        stmt = (
+            select(models.DocumentChunk, models.CourseMaterial)
+            .join(models.CourseMaterial)
+            .where(models.CourseMaterial.goal_id == goal_id)
+        )
+        if material_id is not None:
+            stmt = stmt.where(models.DocumentChunk.material_id == material_id)
+        rows = list(db.execute(stmt).all())
+    finally:
+        db.close()
+
+    if not rows:
+        return []
+
+    prepared: list[tuple[models.DocumentChunk, models.CourseMaterial, list[str]]] = []
+    doc_freq: Counter[str] = Counter()
+    for chunk, material in rows:
+        tokens = _chunk_tokens(chunk)
+        prepared.append((chunk, material, tokens))
+        doc_freq.update(set(tokens))
+
+    avg_len = sum(len(tokens) for _, _, tokens in prepared) / max(len(prepared), 1)
+    hits: list[dict[str, Any]] = []
+    for chunk, material, tokens in prepared:
+        score = _bm25_score(terms, tokens, doc_freq, len(prepared), avg_len)
+        formulas = _safe_list(chunk.formulas)
+        if formula_terms_set and formulas:
+            formula_text = " ".join(str(item) for item in formulas)
+            matched = formula_terms_set.intersection(formula_tokens(formula_text, formulas))
+            score += min(len(matched) * 1.2, 4.8)
+        if score <= 0:
+            continue
+        hits.append(_hit_from_chunk(chunk, material, score))
+
+    hits.sort(key=lambda item: item.get("lexical_score", 0.0), reverse=True)
+    return hits[:limit]
+
+
+def _chunk_tokens(chunk: models.DocumentChunk) -> list[str]:
+    cache_key = (
+        chunk.id,
+        chunk.updated_at.isoformat() if chunk.updated_at else "",
+    )
+    cached = _LEXICAL_TOKEN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    tokens = tokenize_for_lexical(
+        " ".join(
+            [
+                chunk.retrieval_text or "",
+                chunk.content_preview or "",
+                " ".join(_term_texts(chunk.key_terms)),
+                " ".join(str(item) for item in _safe_list(chunk.formulas)),
+            ]
+        )
+    )
+    if len(_LEXICAL_TOKEN_CACHE) > 10000:
+        _LEXICAL_TOKEN_CACHE.clear()
+    _LEXICAL_TOKEN_CACHE[cache_key] = tokens
+    return tokens
+
+
+def _term_texts(value: Any) -> list[str]:
+    terms = []
+    for item in _safe_list(value):
+        if isinstance(item, dict):
+            terms.extend(str(item.get(key) or "") for key in ("source", "zh"))
+        else:
+            terms.append(str(item))
+    return [term for term in terms if term.strip()]
+
+
+def _bm25_score(
+    query_terms: list[str],
+    doc_terms: list[str],
+    doc_freq: Counter[str],
+    total_docs: int,
+    avg_len: float,
+) -> float:
+    if not query_terms or not doc_terms:
+        return 0.0
+    counts = Counter(doc_terms)
+    doc_len = len(doc_terms)
+    k1 = 1.4
+    b = 0.75
+    score = 0.0
+    for term in query_terms:
+        freq = counts.get(term, 0)
+        if freq <= 0:
+            continue
+        df = doc_freq.get(term, 0)
+        idf = math.log(1 + (total_docs - df + 0.5) / (df + 0.5))
+        denom = freq + k1 * (1 - b + b * doc_len / max(avg_len, 1.0))
+        score += idf * (freq * (k1 + 1)) / denom
+    return float(score)
+
+
+def _hit_from_chunk(
+    chunk: models.DocumentChunk, material: models.CourseMaterial, score: float
+) -> dict[str, Any]:
+    return {
+        "content": chunk.content_raw or chunk.retrieval_text or chunk.content_preview,
+        "metadata": {
+            "goal_id": material.goal_id,
+            "material_id": material.id,
+            "chunk_index": chunk.chunk_index,
+            "filename": material.filename,
+            "source": f"{material.filename}#chunk-{chunk.chunk_index}",
+            "source_name": material.filename,
+            "source_type": material.file_type,
+            "key_terms": _safe_list(chunk.key_terms),
+            "formulas": _safe_list(chunk.formulas),
+        },
+        "distance": None,
+        "lexical_score": score,
+        "retrieval_source": "lexical",
+    }
+
+
+def _merge_hits(
+    dense_hits: list[dict[str, Any]], lexical_hits: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for hit in [*dense_hits, *lexical_hits]:
+        key = _hit_key(hit)
+        if key not in merged:
+            merged[key] = dict(hit)
+            continue
+        existing = merged[key]
+        if hit.get("lexical_score") is not None:
+            existing["lexical_score"] = max(
+                float(existing.get("lexical_score") or 0.0),
+                float(hit.get("lexical_score") or 0.0),
+            )
+        if existing.get("distance") is None:
+            existing["distance"] = hit.get("distance")
+        existing["retrieval_source"] = "hybrid"
+        existing["metadata"] = {
+            **(existing.get("metadata") or {}),
+            **(hit.get("metadata") or {}),
+        }
+    return list(merged.values())
+
+
+def _hit_key(hit: dict[str, Any]) -> str:
+    metadata = hit.get("metadata") or {}
+    return f"{metadata.get('material_id', 'unknown')}:{metadata.get('chunk_index', 'unknown')}"
+
+
+def _hybrid_sort_score(hit: dict[str, Any]) -> float:
+    distance = hit.get("distance")
+    dense_score = 0.0 if distance is None else 1.0 / (1.0 + max(float(distance), 0.0))
+    lexical_score = min(float(hit.get("lexical_score") or 0.0), 8.0) / 8.0
+    return dense_score * 0.7 + lexical_score * 0.3
+
+
+def _safe_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
 
 
 def _document_for_embedding(
@@ -172,6 +404,9 @@ def _metadata_for_chunk(
                 "summary_zh": str(item.get("summary_zh") or ""),
                 "key_terms_json": json.dumps(
                     item.get("key_terms") or [], ensure_ascii=False, default=str
+                ),
+                "formulas_json": json.dumps(
+                    item.get("formulas") or [], ensure_ascii=False, default=str
                 ),
             }
         )
@@ -247,4 +482,10 @@ def _decode_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
             decoded["key_terms"] = json.loads(raw_terms)
         except json.JSONDecodeError:
             decoded["key_terms"] = []
+    raw_formulas = decoded.get("formulas_json")
+    if isinstance(raw_formulas, str):
+        try:
+            decoded["formulas"] = json.loads(raw_formulas)
+        except json.JSONDecodeError:
+            decoded["formulas"] = []
     return decoded
