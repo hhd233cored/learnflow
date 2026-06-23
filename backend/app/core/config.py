@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     Docker Compose 会用 PostgreSQL 连接地址覆盖这个默认值。
     """
 
-    app_name: str = "StudyAgent API"
+    app_name: str = "LearnFlow API"
     database_url: str = "sqlite:///./studyagent.db"
     redis_url: str = "redis://localhost:6379/0"
     deepseek_api_key: str = ""

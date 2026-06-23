@@ -117,7 +117,7 @@ async def compress_chat_history(payload: ChatCompressRequest):
     )
     result = await DeepSeekClient().complete_json(
         system_prompt=(
-            "你是 StudyAgent 的聊天历史压缩器。请把较长的学习对话压缩成一条摘要，"
+            "你是 LearnFlow 的聊天历史压缩器。请把较长的学习对话压缩成一条摘要，"
             "用于后续继续问答。必须返回 JSON。保留题目编号、最终答案、关键公式、"
             "推导路线、用户明确纠错点、PDF 页码或资料来源。不要保留寒暄、重复解释、"
             "完整长推导、错误 JSON 和格式噪声。数学公式继续使用 LaTeX 分隔符。"
@@ -1261,7 +1261,7 @@ def _chat_system_prompt(context: str) -> str:
 
     return "\n".join(
         [
-            "你是 StudyAgent 的 AI 学习助手，面向正在备考的大学生。",
+            "你是 LearnFlow 的 AI 学习助手，面向正在备考的大学生。",
             "请用中文回答，结构清晰，尽量给出可执行的学习建议。",
             "如果用户询问知识点，请先解释直觉，再给简短例子或记忆方法。",
             "请使用 Markdown 组织答案；代码、命令和配置用 fenced code block。",

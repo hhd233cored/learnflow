@@ -1,2 +1,1 @@
-"""StudyAgent backend package."""
-
+"""LearnFlow backend package."""

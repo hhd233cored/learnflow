@@ -134,14 +134,14 @@ else {
 
 Write-Step "Start backend FastAPI"
 Start-DevWindow `
-    -Title "StudyAgent Backend" `
+    -Title "LearnFlow Backend" `
     -WorkingDirectory $BackendDir `
     -ScriptPath $BackendRunner `
     -ExtraArgs "-BackendPort $BackendPort"
 
 Write-Step "Start frontend Next.js"
 Start-DevWindow `
-    -Title "StudyAgent Frontend" `
+    -Title "LearnFlow Frontend" `
     -WorkingDirectory $FrontendDir `
     -ScriptPath $FrontendRunner `
     -ExtraArgs "-BackendPort $BackendPort -FrontendPort $FrontendPort"

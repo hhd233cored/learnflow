@@ -16,5 +16,5 @@ if (-not (Test-Path -LiteralPath $BackendPython)) {
 Set-Location -LiteralPath $BackendDir
 
 # 用 python -m uvicorn 可以确保调用的是当前虚拟环境里的 uvicorn。
-Write-Host "Starting StudyAgent backend on http://127.0.0.1:$BackendPort" -ForegroundColor Cyan
+Write-Host "Starting LearnFlow backend on http://127.0.0.1:$BackendPort" -ForegroundColor Cyan
 & $BackendPython -m uvicorn app.main:app --reload --host 127.0.0.1 --port $BackendPort

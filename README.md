@@ -1,236 +1,250 @@
-# StudyAgent
+# LearnFlow
 
-AI 学习执行官第一版：目标输入 -> AI 生成计划 -> 今日任务 -> 用户打卡 -> AI 复盘 -> 调整明日计划。
+LearnFlow 是一个面向课程复习、自学和备考场景的 AI 学习执行官原型。
 
-## 一键本地启动
+它的核心流程是：
 
-Windows 本地开发推荐直接使用项目根目录下的脚本：
+```text
+输入学习目标 -> 上传课程资料 -> 构建 RAG 知识库 -> 生成学习计划
+-> 每日任务打卡 -> 小测反馈 -> AI 复盘 -> 调整后续计划
+```
+
+当前项目支持本地运行 Demo，也可以通过 Docker Compose 启动完整服务。
+配置好Deepseek和PaddleOCR使用效果最佳
+
+## 配置教程
+
+### 1. 环境要求
+
+本地开发建议准备：
+
+- Windows 10/11
+- Python 3.11+
+- Node.js 20 LTS+
+- DeepSeek API Key，用于真实 LLM 生成
+- PaddleOCR Token，用于扫描版 PDF/OCR
+- 可选：Docker Desktop
+- 可选：Redis，只有启用 Celery 异步队列时需要
+
+### 2. 一键生成环境变量
+
+项目根目录提供了环境变量初始化脚本：
+
+```powershell
+.\setup-env.bat
+```
+
+它会创建：
+
+```text
+backend/.env
+frontend/.env.local
+backend/storage/materials
+backend/storage/chroma
+backend/storage/ocr
+```
+
+默认配置适合本地 Demo：
+
+```env
+DATABASE_URL=sqlite:///./studyagent.db
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
+NEXT_PUBLIC_USE_ASYNC_JOBS=false
+OCR_PROVIDER=none
+```
+
+如果已经存在 `backend/.env` 或 `frontend/.env.local`，脚本默认不会覆盖。需要重建时使用：
+
+```powershell
+.\setup-env.bat -Force
+```
+
+### 3. 配置 DeepSeek
+
+相关API Key在https://platform.deepseek.com/usage获取
+如果要启用真实 AI 生成能力，可以在初始化时写入 Key：
+
+```powershell
+.\setup-env.bat -DeepSeekApiKey "你的 DeepSeek API Key" -Force
+```
+
+或者手动编辑 `backend/.env`：
+
+```env
+DEEPSEEK_API_KEY=你的 DeepSeek API Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+```
+
+不填写 `DEEPSEEK_API_KEY` 也可以运行，系统会使用本地规则生成计划、任务和复盘。
+
+### 4. 配置 PaddleOCR
+
+相关Token在https://aistudio.baidu.com/paddleocr获取
+如果要让 PDF 建库时自动 OCR，或者在 PDF 阅读器中手动识别整份 PDF，可以启用 PaddleOCR：
+
+```powershell
+.\setup-env.bat -PaddleOcrToken "你的 PaddleOCR Token" -EnableOcr -Force
+```
+
+对应的 `backend/.env` 配置为：
+
+```env
+OCR_PROVIDER=paddleocr
+PADDLE_OCR_TOKEN=你的 PaddleOCR Token
+PADDLE_OCR_JOB_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+PADDLE_OCR_MODEL=PaddleOCR-VL-1.6
+OCR_STORAGE_DIR=./storage/ocr
+```
+
+如果只是想上传 PDF 阅读，不想自动 OCR，可以保持：
+
+```env
+OCR_PROVIDER=none
+```
+
+### 5. 配置前端
+
+前端只读取 `frontend/.env.local`：
+
+```env
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
+NEXT_PUBLIC_USE_ASYNC_JOBS=false
+```
+
+字段说明：
+
+- `NEXT_PUBLIC_API_BASE_URL`：前端请求后端 API 的地址。
+- `NEXT_PUBLIC_USE_ASYNC_JOBS=false`：本地 Demo 推荐配置，不依赖 Redis/Celery。
+- `NEXT_PUBLIC_USE_ASYNC_JOBS=true`：启用异步任务轮询，需要 Redis 和 Celery worker。
+
+修改前端环境变量后，需要重启前端开发服务。
+
+### 6. 安装依赖
+
+第一次运行建议执行：
 
 ```powershell
 .\install-local.bat
+```
+
+脚本会安装后端 Python 依赖和前端 Node 依赖。
+
+也可以手动安装：
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+```powershell
+cd frontend
+npm install
+```
+
+### 7. 启动本地 Demo
+
+推荐使用：
+
+```powershell
 .\start-local.bat
 ```
 
-前置条件是本机已经安装 Python 3.11+ 和 Node.js 20 LTS+；脚本会自动检查，
-并继续安装项目内的 Python 依赖和 Node 依赖。
+脚本会分别启动后端和前端。
 
-`install-local.bat` 会创建后端虚拟环境、安装 Python/Node 依赖，并在缺失时生成
-`backend\.env` 与 `frontend\.env.local`。默认不会覆盖已有环境文件，避免误删
-`DEEPSEEK_API_KEY`；如果确实要重建环境文件，可以执行：
+启动后访问：
+
+```text
+前端：http://127.0.0.1:3000
+后端健康检查：http://127.0.0.1:8000/api/v1/health
+LLM 健康检查：http://127.0.0.1:8000/api/v1/llm/health
+```
+
+也可以手动启动：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install-local.ps1 -ForceEnv
-```
-
-`start-local.bat` 会分别打开后端 FastAPI 和前端 Next.js 两个命令行窗口，
-并自动用默认浏览器打开前端页面。
-本地默认使用 SQLite + 同步计划生成模式，因此不需要启动 Docker、Redis 或 Celery。
-
-打开地址：
-
-```text
-后端健康检查：http://127.0.0.1:8000/api/v1/health
-前端页面：http://127.0.0.1:3000
-```
-
-## 技术栈
-
-- 前端：Next.js + TypeScript + Tailwind CSS + Shadcn 风格组件
-- 后端：FastAPI + Pydantic + SQLAlchemy
-- Agent：LangGraph
-- 数据库：PostgreSQL
-- 缓存：Redis
-- LLM：DeepSeek API，未配置 Key 时使用本地规则兜底
-- 向量库：Chroma，第二阶段接入
-- 部署：Docker Compose
-
-## 快速启动
-
-1. 复制环境变量：
-
-```bash
-cp .env.example .env
-```
-
-2. 按需填写 `DEEPSEEK_API_KEY`。不填写也可以运行 Demo，后端会使用本地规则生成学习计划和复盘。
-
-3. 启动服务：
-
-```bash
-docker compose up --build
-```
-
-4. 打开：
-
-```text
-http://localhost:3000
-```
-
-## 本地开发
-
-后端：
-
-```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-cd C:\Users\33612\Documents\GitHub\StudyAgent\backend
 .\.venv\Scripts\activate
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-前端：
-
-```bash
+```powershell
 cd frontend
-npm install
-
-cd C:\Users\33612\Documents\GitHub\StudyAgent\frontend
 npm.cmd run dev
 ```
 
-本地开发默认可以不启动 Redis/Celery。保持 `.env` 中：
+### 8. 启用 Celery 异步队列（本地启动则不需要）
+
+本地 Demo 默认不需要 Redis/Celery。如果要测试真实异步队列：
+
+1. 启动 Redis。
+2. 设置前端环境变量：
 
 ```env
-NEXT_PUBLIC_USE_ASYNC_JOBS=false
+NEXT_PUBLIC_USE_ASYNC_JOBS=true
 ```
 
-此时前端会显示模拟进度条，但计划生成仍走同步接口 `POST /api/v1/goals`。
-如果要测试真实异步队列，再改为 `true`，并启动 Redis 和 Celery worker。
-
-## 第一版功能
-
-- 创建学习目标
-- 创建目标时可提前上传 PDF/PPT/Word/TXT/MD 课程资料
-- 生成阶段计划和每日计划
-- 生成今日任务
-- 任务打卡与完成率统计
-- AI 复盘总结
-- 根据完成率和薄弱点调整明日计划
-- 每个任务支持 AI 生成 3 道小测题，并在弹窗中完成答题和基础批改
-- 右侧 AI 学习助手聊天抽屉，支持流式输出和当前计划上下文
-- 我的学习计划：刷新后可恢复历史计划，支持切换和删除
-
-## v0.2 课程知识库
-
-当前已接入 Chroma 本地持久化知识库，支持上传课程资料并建库：
-
-- 支持格式：PDF、DOCX、PPTX、TXT、MD
-- 解析工具：PyMuPDF、python-docx、python-pptx
-- 切分策略：段落优先，长段落按窗口切分
-- 向量库：Chroma `PersistentClient`
-- Embedding：本地哈希 embedding，离线可运行，后续可替换为真实 embedding 模型
-- RAG 增强：上传资料会生成语言标记、中文摘要和中英术语表；英文资料会以“原文 + 中文摘要 + 术语”写入 Chroma，方便中文检索英文教材
-
-说明：
-
-- DeepSeek 继续负责摘要、术语抽取、计划生成和任务生成。
-- 当前 embedding 仍是本地哈希向量，便于离线 Demo；后续可替换为 bge-m3、Qwen Embedding 等多语言 embedding。
-- 未配置 `DEEPSEEK_API_KEY` 时，系统会使用本地启发式规则生成摘要和术语，不影响基本建库流程。
-
-接口：
-
-```text
-POST /api/v1/goals/with-materials
-POST /api/v1/goals/{goal_id}/materials/upload
-GET  /api/v1/goals/{goal_id}/materials
-GET  /api/v1/materials/{material_id}
-POST /api/v1/goals/{goal_id}/knowledge/search
-POST /api/v1/tasks/{task_id}/quiz
-POST /api/v1/quizzes/{quiz_id}/submit
-```
-
-上传示例：
+3. 启动 Celery worker：
 
 ```powershell
-Invoke-RestMethod `
-  -Uri "http://127.0.0.1:8000/api/v1/goals/1/materials/upload" `
-  -Method Post `
-  -Form @{ file = Get-Item "C:\path\to\course.pdf" }
-```
-
-检索示例：
-
-```powershell
-Invoke-RestMethod `
-  -Uri "http://127.0.0.1:8000/api/v1/goals/1/knowledge/search" `
-  -Method Post `
-  -ContentType "application/json" `
-  -Body '{"query":"进程同步 PV 操作","top_k":5}'
-```
-
-本地运行时会把上传文件和 Chroma 数据保存到：
-
-```text
-backend/storage/
-```
-
-学习计划、每日任务和复盘默认保存在本地 SQLite：
-
-```text
-backend/studyagent.db
-```
-
-只要 `backend/studyagent.db` 和 `backend/storage/` 不删除，下次打开前端时就可以从
-“我的学习计划”中恢复已有计划，并继续使用已构建的 Chroma 知识库。
-
-## v0.2 异步任务队列
-
-当前已接入 Celery + Redis，用于处理耗时任务：
-
-- 课程资料异步解析与 Chroma 建库
-- 学习目标异步长计划生成
-- jobs 表记录任务状态，前端或接口文档可轮询查询进度
-
-新增接口：
-
-```text
-POST /api/v1/goals/async
-POST /api/v1/goals/{goal_id}/materials/upload/async
-GET  /api/v1/jobs/{job_id}
-```
-
-任务状态：
-
-```text
-pending   等待 worker 处理
-running   正在执行
-success   执行成功
-failed    执行失败
-```
-
-Docker Compose 会同时启动 `backend` 和 `worker`：
-
-```bash
-docker compose up --build
-```
-
-Windows 本地开发时，需要先启动 Redis，然后另开一个 PowerShell 启动 worker：
-
-```powershell
-cd C:\Users\33612\Documents\GitHub\StudyAgent\backend
+cd backend
 .\.venv\Scripts\activate
 celery -A app.tasks.celery_app.celery_app worker --loglevel=info --pool=solo
 ```
 
-`--pool=solo` 是 Windows 本地运行 Celery worker 时更稳的方式。
+Windows 本地建议使用 `--pool=solo`。
 
-## AI 聊天助手
+### 9. Docker Compose 配置（本地启动则不需要）
 
-前端右下角提供可展开聊天抽屉，后端接口：
+Docker 模式读取项目根目录的 `.env`。可以从模板复制：
 
-```text
-POST /api/v1/chat/stream
+```powershell
+Copy-Item .env.example .env
 ```
 
-请求会携带多轮消息、当前 `goal_id` 和 `plan_id`。后端会读取当前学习目标、
-选中 Day、任务状态，并检索 Chroma 课程资料，然后通过 DeepSeek 流式返回。
-如果未配置 `DEEPSEEK_API_KEY`，接口会返回本地兜底文本流，方便离线 Demo。
+然后按需修改 `.env`：
 
-## 第二阶段建议
+```env
+DATABASE_URL=postgresql+psycopg://studyagent:studyagent@postgres:5432/studyagent
+REDIS_URL=redis://redis:6379/0
+DEEPSEEK_API_KEY=
+OCR_PROVIDER=none
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
+NEXT_PUBLIC_USE_ASYNC_JOBS=true
+```
 
-- 替换为真实语义 embedding 模型，提升中文课程资料检索质量
-- 加入用户登录与长期学习画像
-- 加入测试集，评估计划生成质量和格式稳定性
+启动：
+
+```powershell
+docker compose up --build
+```
+
+注意：`postgres` 这个数据库主机名只在 Docker Compose 网络内有效。本地直接运行后端时请使用：
+
+```env
+DATABASE_URL=sqlite:///./studyagent.db
+```
+
+## 技术栈
+
+### 前端
+
+- Next.js + React + TypeScript
+- Tailwind CSS + Shadcn
+- react-markdown + KaTeX
+
+### 后端
+
+- FastAPI + Pydantic + SQLAlchemy
+- SQLite / PostgreSQL
+- Celery + Redis
+- Docker Compose
+
+### Agent 与 RAG
+
+- LangGraph
+- Chroma
+- PyMuPDF / python-docx / python-pptx
+- PaddleOCR

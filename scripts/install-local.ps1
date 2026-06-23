@@ -311,7 +311,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $BackendDir "storage\ocr") 
 Write-Step "Prepare local environment files"
 $BackendEnvPath = Join-Path $BackendDir ".env"
 $BackendEnvContent = @'
-# StudyAgent backend local development config.
+# LearnFlow backend local development config.
 # SQLite keeps local startup independent from Docker/PostgreSQL.
 DATABASE_URL=sqlite:///./studyagent.db
 
@@ -345,7 +345,7 @@ Write-EnvFileIfNeeded -FilePath $BackendEnvPath -DirectoryPath $BackendDir -Cont
 
 $FrontendEnvPath = Join-Path -Path $FrontendDir -ChildPath ".env.local"
 $FrontendEnvContent = @'
-# StudyAgent frontend local development config.
+# LearnFlow frontend local development config.
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000/api/v1
 
 # false means local sync mode, so Redis/Celery is not required.

@@ -24,5 +24,5 @@ Set-Location -LiteralPath $FrontendDir
 $env:NEXT_PUBLIC_API_BASE_URL = "http://127.0.0.1:$BackendPort/api/v1"
 $env:NEXT_PUBLIC_USE_ASYNC_JOBS = "false"
 
-Write-Host "Starting StudyAgent frontend on http://127.0.0.1:$FrontendPort" -ForegroundColor Cyan
+Write-Host "Starting LearnFlow frontend on http://127.0.0.1:$FrontendPort" -ForegroundColor Cyan
 & $NpmCommand.Source run dev -- --hostname 127.0.0.1 --port $FrontendPort
