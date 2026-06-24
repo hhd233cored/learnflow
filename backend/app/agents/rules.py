@@ -49,7 +49,12 @@ def build_rule_based_plan(goal: dict) -> dict:
     """
 
     day_count = infer_day_count(goal)
-    topics = goal.get("key_topics") or _topics_from_material_context(goal) or DEFAULT_OS_TOPICS
+    topics = (
+        goal.get("key_topics")
+        or _topics_from_outline_context(goal)
+        or _topics_from_material_context(goal)
+        or DEFAULT_OS_TOPICS
+    )
     topic_pool = [*topics, *DEFAULT_OS_TOPICS]
     material_note = _material_note(goal)
     start_date = date.today()
@@ -83,6 +88,20 @@ def build_rule_based_plan(goal: dict) -> dict:
         ],
         "daily_plans": daily_plans,
     }
+
+
+def _topics_from_outline_context(goal: dict) -> list[str]:
+    """Use material outlines as the first local fallback source for plan topics."""
+
+    topics: list[str] = []
+    for material in goal.get("material_outline_context") or []:
+        for item in material.get("items") or []:
+            title = str(item.get("title") or "").strip()
+            if 2 <= len(title) <= 120 and title not in topics:
+                topics.append(title)
+            if len(topics) >= 12:
+                return topics
+    return topics
 
 
 def _topics_from_material_context(goal: dict) -> list[str]:

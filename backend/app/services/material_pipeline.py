@@ -14,6 +14,7 @@ from app.services.chunking import split_text_into_chunks
 from app.services.document_enrichment import enrich_chunks
 from app.services.document_parser import extract_text
 from app.services.knowledge_base import ChromaKnowledgeBase
+from app.services.material_outline import extract_material_outline
 from app.services.paddle_ocr import cached_ocr_document_text, ensure_pdf_ocr_with_progress
 
 
@@ -37,6 +38,7 @@ async def build_material_knowledge_base(
 
     source_type = material.file_type
     chunk_metadatas: list[dict] | None = None
+    ocr_pages: list[Any] | None = None
     text = ""
 
     if material.file_type.lower() == "pdf":
@@ -48,6 +50,7 @@ async def build_material_knowledge_base(
         )
         if ocr_result is not None:
             source_type = "ocr"
+            ocr_pages = ocr_result.pages
             chunks = []
             chunk_metadatas = []
             _report(
@@ -103,6 +106,14 @@ async def build_material_knowledge_base(
     if not chunks:
         raise ValueError("No readable text was extracted from this file.")
 
+    material = await _extract_and_store_outline(
+        db,
+        material,
+        text,
+        ocr_pages,
+        progress_callback,
+    )
+
     _report(
         progress_callback,
         "enriching",
@@ -137,6 +148,42 @@ async def build_material_knowledge_base(
     )
     logger.info("[%s] 建库完成：%d 个 chunk", material.filename, len(chunks))
     return material
+
+
+async def _extract_and_store_outline(
+    db: Session,
+    material: models.CourseMaterial,
+    document_text: str,
+    ocr_pages: list[Any] | None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None,
+) -> models.CourseMaterial:
+    _report(
+        progress_callback,
+        "extracting_outline",
+        {"message": f"正在读取目录和章节结构：{material.filename}"},
+    )
+    try:
+        outline = await extract_material_outline(
+            material,
+            document_text=document_text,
+            ocr_pages=ocr_pages,
+        )
+        return crud.update_material_outline(
+            db,
+            material,
+            outline.items,
+            outline.status,
+            outline.source,
+        )
+    except Exception as exc:
+        logger.warning("[%s] 章节结构提取失败：%s", material.filename, exc)
+        return crud.update_material_outline(
+            db,
+            material,
+            [],
+            "failed",
+            "heading_infer",
+        )
 
 
 def _report(

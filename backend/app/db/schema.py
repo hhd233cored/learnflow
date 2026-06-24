@@ -37,6 +37,35 @@ def ensure_demo_schema_columns(engine: Engine) -> None:
             statements.append(
                 f"ALTER TABLE document_chunks ADD COLUMN key_terms {_json_type(engine)}"
             )
+        if "content_preview" in existing_columns:
+            statements.append(
+                "UPDATE document_chunks "
+                "SET content_raw = content_preview "
+                "WHERE content_raw IS NULL"
+            )
+            statements.append(
+                "UPDATE document_chunks "
+                "SET retrieval_text = content_preview "
+                "WHERE retrieval_text IS NULL"
+            )
+
+    if inspector.has_table("course_materials"):
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("course_materials")
+        }
+        if "outline_json" not in existing_columns:
+            statements.append(
+                f"ALTER TABLE course_materials ADD COLUMN outline_json {_json_type(engine)}"
+            )
+        if "outline_status" not in existing_columns:
+            statements.append(
+                "ALTER TABLE course_materials "
+                "ADD COLUMN outline_status VARCHAR(30) DEFAULT 'pending'"
+            )
+        if "outline_source" not in existing_columns:
+            statements.append(
+                "ALTER TABLE course_materials ADD COLUMN outline_source VARCHAR(40)"
+            )
 
     if not statements:
         return

@@ -53,16 +53,19 @@ async def _run_single_node(
     if StateGraph is None:
         return await node(state)
 
-    graph = StateGraph(AgentState)
-    graph.add_node(node_name, node)
-    graph.set_entry_point(node_name)
-    graph.add_edge(node_name, END)
-    compiled = graph.compile()
-    return await compiled.ainvoke(state)
+    try:
+        graph = StateGraph(AgentState)
+        graph.add_node(node_name, node)
+        graph.set_entry_point(node_name)
+        graph.add_edge(node_name, END)
+        compiled = graph.compile()
+        return await compiled.ainvoke(state)
+    except Exception:
+        return await node(state)
 
 
 async def generate_plan(
-    goal: GoalCreate, knowledge_context: list[dict[str, Any]] | None = None
+    goal: GoalCreate, knowledge_context: Any | None = None
 ) -> list[dict[str, Any]]:
     """为学习目标生成完整每日计划，并做格式归一化。
 
@@ -73,8 +76,11 @@ async def generate_plan(
     """
 
     goal_payload = goal.model_dump()
-    if knowledge_context:
-        goal_payload["knowledge_context"] = knowledge_context
+    retrieved_chunks, material_outlines = _split_planner_context(knowledge_context)
+    if retrieved_chunks:
+        goal_payload["knowledge_context"] = retrieved_chunks
+    if material_outlines:
+        goal_payload["material_outline_context"] = material_outlines
 
     async def planner_node(state: AgentState) -> AgentState:
         """向 Planner Agent 请求 `daily_plans` JSON 的 LangGraph 节点。"""
@@ -85,12 +91,17 @@ async def generate_plan(
             system_prompt=(
                 "你是 Planner Agent。请为大学生学习目标生成结构化计划，"
                 "目标可能是考试倒计时，也可能是固定周期学完一门课。"
-                "如果提供了课程资料上下文，请优先结合资料中的章节、概念和术语安排计划。"
+                "如果提供了课程资料目录，请优先按照目录/章节顺序安排计划，"
+                "不要只根据零散检索片段主观发挥。"
+                "如果用户填写了重点章节，请用它们筛选或强调目录中的相关章节。"
+                "如果天数少于章节数，请合并相邻章节；如果天数多于章节数，请给重点章节增加练习和复盘日。"
+                "如果提供了课程资料检索片段，请把它作为章节内容和概念术语的补充依据。"
                 f"必须严格生成 {planned_days} 天计划，并返回 JSON，字段包含 daily_plans。"
             ),
             user_payload={
                 "goal": state["goal"],
                 "planned_days": planned_days,
+                "material_outline_context": state["goal"].get("material_outline_context", []),
                 "knowledge_context": state["goal"].get("knowledge_context", []),
                 "schema": _plan_schema_hint(),
             },
@@ -101,6 +112,21 @@ async def generate_plan(
     result = await _run_single_node("planner", planner_node, {"goal": goal_payload})
     fallback_items = build_rule_based_plan(goal_payload)["daily_plans"]
     return _normalize_daily_plans(result.get("plan", {}), fallback_items)
+
+
+def _split_planner_context(
+    knowledge_context: Any | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if isinstance(knowledge_context, dict):
+        chunks = knowledge_context.get("retrieved_chunks") or []
+        outlines = knowledge_context.get("material_outlines") or []
+        return (
+            chunks if isinstance(chunks, list) else [],
+            outlines if isinstance(outlines, list) else [],
+        )
+    if isinstance(knowledge_context, list):
+        return knowledge_context, []
+    return [], []
 
 
 async def generate_tasks(goal: dict, daily_plan: dict) -> list[dict[str, Any]]:

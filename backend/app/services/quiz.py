@@ -49,16 +49,20 @@ async def generate_quiz_for_task(task: models.StudyTask) -> dict[str, Any]:
     }
 
 
-async def grade_quiz_answers(
+def grade_quiz_answers_local(
     questions: list[dict[str, Any]], answers: list[dict[str, str]]
 ) -> dict[str, Any]:
-    """批改任务小测答案，返回对错、单题分和总体建议。
+    """本地判题：客观题按标准答案，主观题只展示参考答案。"""
 
-    单选题会用确定性规则判断，简答题优先交给 LLM 做宽松批改；未配置 Key 时使用
-    关键词和答案长度做大致判断。这里的分数只服务 Demo 反馈，不作为正式考试评分。
-    """
+    return _rule_based_grade(questions, answers, grade_short_answers=False)
 
-    fallback = _rule_based_grade(questions, answers)
+
+async def grade_quiz_answers_ai(
+    questions: list[dict[str, Any]], answers: list[dict[str, str]]
+) -> dict[str, Any]:
+    """按需调用 LLM 批改任务小测答案。"""
+
+    fallback = _rule_based_grade(questions, answers, grade_short_answers=False)
     result = await DeepSeekClient().complete_json(
         system_prompt=(
             "你是 Grading Agent。请宽松批改一组任务小测答案，返回 JSON。"
@@ -373,7 +377,10 @@ def _normalize_choice_answer(raw: Any, options: list[str], fallback: str) -> str
 
 
 def _rule_based_grade(
-    questions: list[dict[str, Any]], answers: list[dict[str, str]]
+    questions: list[dict[str, Any]],
+    answers: list[dict[str, str]],
+    *,
+    grade_short_answers: bool = True,
 ) -> dict[str, Any]:
     """本地兜底批改。"""
 
@@ -394,7 +401,7 @@ def _rule_based_grade(
                     "correct_answer": correct_answer,
                 }
             )
-        else:
+        elif grade_short_answers:
             score = _short_answer_score(
                 answer,
                 str(question.get("reference_answer") or ""),
@@ -409,13 +416,39 @@ def _rule_based_grade(
                     "correct_answer": str(question.get("reference_answer") or ""),
                 }
             )
+        else:
+            items.append(
+                {
+                    "question_id": question_id,
+                    "is_correct": False,
+                    "score": 0,
+                    "feedback": "主观题暂不自动批改，请对照参考答案自查；需要模型判断时可点击 AI 批改。",
+                    "correct_answer": str(question.get("reference_answer") or ""),
+                }
+            )
 
-    overall = _average_score(items)
+    scored_items = [
+        item
+        for item in items
+        if grade_short_answers
+        or _question_by_id(questions, str(item.get("question_id"))).get("type")
+        == "single_choice"
+    ]
+    overall = _average_score(scored_items)
     return {
         "score": overall,
         "items": items,
-        "summary": _summary_for_score(overall),
+        "summary": _summary_for_score(overall)
+        if grade_short_answers
+        else "已完成本地判题：客观题按标准答案判定，主观题仅展示参考答案。",
     }
+
+
+def _question_by_id(questions: list[dict[str, Any]], question_id: str) -> dict[str, Any]:
+    for question in questions:
+        if str(question.get("id")) == question_id:
+            return question
+    return {}
 
 
 def _normalize_grade_result(

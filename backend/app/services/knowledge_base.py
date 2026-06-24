@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app import models
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.services.document_enrichment import clean_key_term, is_valid_key_term
 from app.services.embeddings import get_embedding_function
 from app.services.query_rewrite import QueryPlan, formula_tokens, rewrite_query, tokenize_for_lexical
 from app.services.rerankers import get_reranker
@@ -287,10 +288,35 @@ def _term_texts(value: Any) -> list[str]:
     terms = []
     for item in _safe_list(value):
         if isinstance(item, dict):
-            terms.extend(str(item.get(key) or "") for key in ("source", "zh"))
+            confidence = _safe_float(item.get("confidence"))
+            if confidence is not None and confidence < 0.45:
+                continue
+            for key in ("source", "zh"):
+                term = clean_key_term(str(item.get(key) or ""))
+                if is_valid_key_term(term):
+                    terms.append(term)
         else:
-            terms.append(str(item))
-    return [term for term in terms if term.strip()]
+            term = clean_key_term(str(item))
+            if is_valid_key_term(term):
+                terms.append(term)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        value = term.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _bm25_score(

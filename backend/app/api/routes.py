@@ -45,10 +45,15 @@ from app.services.knowledge_base import ChromaKnowledgeBase, collection_name_for
 from app.services.local_jobs import start_goal_with_materials_job
 from app.services.material_pipeline import build_material_knowledge_base
 from app.services.materials import delete_material_files, save_upload_file
+from app.services.material_outline import extract_material_outline
 from app.services.paddle_ocr import ensure_pdf_ocr
 from app.services.pdf_reader import pdf_meta, pdf_page_text, render_pdf_page_png
 from app.services.planning_context import knowledge_context_for_goal as planner_knowledge_context
-from app.services.quiz import generate_quiz_for_task, grade_quiz_answers
+from app.services.quiz import (
+    generate_quiz_for_task,
+    grade_quiz_answers_ai,
+    grade_quiz_answers_local,
+)
 from app.tasks.jobs import generate_goal_plan_task, parse_material_task
 
 router = APIRouter(prefix="/api/v1")
@@ -510,6 +515,27 @@ async def ocr_course_material(material_id: int, db: Session = Depends(get_db)):
         return crud.mark_material_failed(db, material, str(exc))
     if ocr_result is None:
         raise HTTPException(status_code=400, detail="当前未启用 PaddleOCR。")
+    try:
+        outline = await extract_material_outline(
+            material,
+            document_text="",
+            ocr_pages=ocr_result.pages,
+        )
+        material = crud.update_material_outline(
+            db,
+            material,
+            outline.items,
+            outline.status,
+            outline.source,
+        )
+    except Exception:
+        material = crud.update_material_outline(
+            db,
+            material,
+            [],
+            "failed",
+            "ocr_markdown",
+        )
     return crud.mark_material_ocr_ready(db, material, len(ocr_result.pages))
 
 
@@ -720,7 +746,9 @@ async def generate_daily_tasks(plan_id: int, db: Session = Depends(get_db)):
     daily_plan = _plan_payload(plan)
     daily_plan["knowledge_context"] = _knowledge_context_for_plan(plan)
     tasks = await workflow.generate_tasks(_goal_payload(plan.goal), daily_plan)
-    return crud.replace_tasks(db, plan.id, tasks)
+    saved_tasks = crud.replace_tasks(db, plan.id, tasks)
+    await _ensure_quizzes_for_tasks(db, saved_tasks)
+    return saved_tasks
 
 
 @router.get("/plans/{plan_id}/tasks", response_model=list[StudyTaskRead])
@@ -801,9 +829,57 @@ async def submit_task_quiz(
         raise HTTPException(status_code=404, detail="Task quiz not found")
 
     answers = [item.model_dump() for item in payload.answers]
-    result = await grade_quiz_answers(quiz.questions_json, answers)
+    result = grade_quiz_answers_local(quiz.questions_json, answers)
     updated = crud.submit_task_quiz(db, quiz, answers, result)
     return _quiz_payload(updated)
+
+
+@router.post("/quizzes/{quiz_id}/ai-grade", response_model=TaskQuizRead)
+async def ai_grade_task_quiz(
+    quiz_id: int,
+    payload: QuizSubmitRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """按需调用 LLM 批改小测，避免普通提交时等待模型响应。"""
+
+    quiz = crud.get_quiz(db, quiz_id)
+    if quiz is None:
+        raise HTTPException(status_code=404, detail="Task quiz not found")
+
+    answers = (
+        [item.model_dump() for item in payload.answers]
+        if payload is not None
+        else list(quiz.answers_json or [])
+    )
+    if not answers:
+        raise HTTPException(status_code=400, detail="Submit answers before AI grading")
+
+    result = await grade_quiz_answers_ai(quiz.questions_json, answers)
+    updated = crud.submit_task_quiz(db, quiz, answers, result)
+    return _quiz_payload(updated)
+
+
+async def _ensure_quizzes_for_tasks(
+    db: Session, tasks: list[models.StudyTask]
+) -> None:
+    """Pre-generate one quiz for every task so opening the dialog is instant."""
+
+    for task in tasks:
+        if crud.latest_quiz_for_task(db, task.id) is not None:
+            continue
+        task_with_context = crud.get_task_with_context(db, task.id)
+        if task_with_context is None:
+            continue
+        try:
+            generated = await generate_quiz_for_task(task_with_context)
+            crud.create_task_quiz(
+                db,
+                task=task_with_context,
+                questions=generated["questions"],
+                source_mode=generated["source_mode"],
+            )
+        except Exception:
+            continue
 
 
 @router.post("/plans/{plan_id}/review", response_model=StudyReviewRead)
@@ -849,6 +925,7 @@ async def _create_review_for_plan(
     if not tasks:
         generated = await workflow.generate_tasks(_goal_payload(plan.goal), _plan_payload(plan))
         tasks = crud.replace_tasks(db, plan.id, generated)
+        await _ensure_quizzes_for_tasks(db, tasks)
 
     task_payloads = [_task_payload(item) for item in tasks]
     review = await workflow.generate_review(
@@ -1434,7 +1511,7 @@ def _parse_key_topics(raw: str) -> list[str]:
     return [item.strip() for item in raw.replace("，", ",").split(",") if item.strip()]
 
 
-def _knowledge_context_for_goal(goal_id: int, payload: GoalCreate) -> list[dict]:
+def _knowledge_context_for_goal(goal_id: int, payload: GoalCreate) -> dict:
     """为 Planner Agent 检索目标级课程资料上下文。
 
     总计划还没有具体 day/topic，因此用学习目标标题和重点章节作为查询词。

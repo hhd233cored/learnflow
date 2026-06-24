@@ -301,6 +301,9 @@ class CourseMaterialRead(BaseModel):
     error_message: str | None = None
     chunk_count: int
     chroma_collection: str
+    outline_json: list[dict] | None = None
+    outline_status: str | None = None
+    outline_source: str | None = None
 
 
 class MaterialPdfMetaRead(BaseModel):

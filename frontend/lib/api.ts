@@ -338,10 +338,21 @@ export const api = {
     });
   },
 
+  getTaskQuiz(taskId: number) {
+    return request<TaskQuiz>(`/tasks/${taskId}/quiz`);
+  },
+
   submitTaskQuiz(quizId: number, answers: QuizAnswerItem[]) {
     return request<TaskQuiz>(`/quizzes/${quizId}/submit`, {
       method: "POST",
       body: JSON.stringify({ answers })
+    });
+  },
+
+  aiGradeTaskQuiz(quizId: number, answers?: QuizAnswerItem[]) {
+    return request<TaskQuiz>(`/quizzes/${quizId}/ai-grade`, {
+      method: "POST",
+      body: JSON.stringify(answers ? { answers } : { answers: [] })
     });
   },
 

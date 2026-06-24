@@ -521,6 +521,23 @@ def mark_material_ocr_ready(
     return material
 
 
+def update_material_outline(
+    db: Session,
+    material: models.CourseMaterial,
+    outline_items: list[dict],
+    outline_status: str,
+    outline_source: str,
+) -> models.CourseMaterial:
+    """Persist the extracted material outline without touching chunks or Chroma."""
+
+    material.outline_json = outline_items
+    material.outline_status = outline_status
+    material.outline_source = outline_source
+    db.commit()
+    db.refresh(material)
+    return material
+
+
 def replace_material_chunks(
     db: Session,
     material: models.CourseMaterial,

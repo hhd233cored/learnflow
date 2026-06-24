@@ -189,6 +189,11 @@ class CourseMaterial(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     chroma_collection: Mapped[str] = mapped_column(String(120), nullable=False)
+    outline_json: Mapped[list[dict] | None] = mapped_column(
+        MutableList.as_mutable(json_column()), nullable=True, default=list
+    )
+    outline_status: Mapped[str] = mapped_column(String(30), default="pending")
+    outline_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     goal: Mapped[LearningGoal] = relationship(back_populates="materials")
     chunks: Mapped[list["DocumentChunk"]] = relationship(

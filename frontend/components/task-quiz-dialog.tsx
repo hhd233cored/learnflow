@@ -38,6 +38,7 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [aiGrading, setAiGrading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const resultMap = useMemo(() => {
@@ -65,7 +66,16 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
     setLoading(true);
     setError(null);
     try {
-      const nextQuiz = await api.generateTaskQuiz(task.id, regenerate);
+      let nextQuiz: TaskQuiz;
+      if (regenerate) {
+        nextQuiz = await api.generateTaskQuiz(task.id, true);
+      } else {
+        try {
+          nextQuiz = await api.getTaskQuiz(task.id);
+        } catch {
+          nextQuiz = await api.generateTaskQuiz(task.id, false);
+        }
+      }
       setQuiz(nextQuiz);
       setAnswers(
         Object.fromEntries(
@@ -101,6 +111,31 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
       setError(err instanceof Error ? err.message : "提交批改失败");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleAiGrade() {
+    if (!quiz) {
+      return;
+    }
+    setAiGrading(true);
+    setError(null);
+    try {
+      const payload: QuizAnswerItem[] = quiz.questions.map((question) => ({
+        question_id: question.id,
+        answer: answers[question.id] ?? ""
+      }));
+      const nextQuiz = await api.aiGradeTaskQuiz(quiz.id, payload);
+      setQuiz(nextQuiz);
+      setAnswers(
+        Object.fromEntries(
+          (nextQuiz.answers ?? []).map((item) => [item.question_id, item.answer])
+        )
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI 批改失败");
+    } finally {
+      setAiGrading(false);
     }
   }
 
@@ -188,7 +223,7 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
           <Button
             variant="outline"
             onClick={() => loadQuiz(true)}
-            disabled={loading || submitting}
+            disabled={loading || submitting || aiGrading}
           >
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
@@ -202,8 +237,21 @@ export function TaskQuizDialog({ open, task, onClose }: TaskQuizDialogProps) {
               关闭
             </Button>
             <Button
+              variant="outline"
+              onClick={handleAiGrade}
+              disabled={!quiz || submitting || loading || aiGrading}
+              title="调用 AI 批改主观题"
+            >
+              {aiGrading ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <BrainCircuit className="h-4 w-4" aria-hidden="true" />
+              )}
+              AI 批改
+            </Button>
+            <Button
               onClick={handleSubmit}
-              disabled={!quiz || Boolean(quiz.result) || submitting || loading}
+              disabled={!quiz || Boolean(quiz.result) || submitting || loading || aiGrading}
             >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

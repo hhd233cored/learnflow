@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app import crud, models
 from app.agents import workflow
 from app.schemas import GoalCreate
+from app.services.planning_context import knowledge_context_for_goal
 
 
 async def generate_and_store_goal_plan(
@@ -25,5 +26,6 @@ async def generate_and_store_goal_plan(
         current_level=goal.current_level,
         key_topics=goal.key_topics,
     )
-    daily_plans = await workflow.generate_plan(payload)
+    knowledge_context = knowledge_context_for_goal(goal.id, payload)
+    daily_plans = await workflow.generate_plan(payload, knowledge_context)
     return crud.replace_goal_plans(db, goal, daily_plans)

@@ -145,6 +145,13 @@ async def run_goal_with_materials_job(
             },
         )
         knowledge_context = knowledge_context_for_goal(goal.id, payload)
+        context_chunks = []
+        context_outlines = []
+        if isinstance(knowledge_context, dict):
+            context_chunks = knowledge_context.get("retrieved_chunks") or []
+            context_outlines = knowledge_context.get("material_outlines") or []
+        elif isinstance(knowledge_context, list):
+            context_chunks = knowledge_context
 
         _update_job(
             db,
@@ -154,7 +161,10 @@ async def run_goal_with_materials_job(
                 "stage": "planning",
                 "message": "正在调用 Planner Agent 生成阶段计划和每日计划。",
                 "goal_id": goal.id,
-                "knowledge_hits": len(knowledge_context),
+                "knowledge_hits": len(context_chunks),
+                "outline_count": sum(
+                    len(item.get("items") or []) for item in context_outlines
+                ),
                 "failed_materials": failed_materials,
             },
         )
@@ -218,6 +228,7 @@ def _material_progress(
         "ocr_cached": 0.35,
         "chunking": 0.55,
         "parsing": 0.4,
+        "extracting_outline": 0.62,
         "enriching": 0.7,
         "indexing": 0.88,
         "rag_ready": 1.0,
